@@ -37,14 +37,95 @@ def quadrature(k_min, k_max, N):
     '''
 
     ratio = k_min / k_max
-    grid, weights = unit_quadrature(ratio, N)
+    grid, weights = unit_quadrature_nnls(ratio, N)
     grid *= k_max
     weights *= ratio ** 3
 
     return grid, weights
 
 
-def unit_quadrature(alpha, N, grid_type="Uniform"):
+def unit_quadrature_nnls(alpha, N, grid_type="Uniform"):
+    ''' Returns a quadrature rule which has N grid points on each dimension.
+    Minimises the integration error of symmetric polynomials 
+    order <= f(N) over a tetrapyd specified by the triangle conditions and
+    alpha <= k1, k2, k3 <= 1
+    '''
+
+    # Set up grid points
+    if grid_type == "Uniform":
+        i1, i2, i3 = uni_tetra_triplets(alpha, N)
+        grid_1d = np.linspace(alpha, 1, N)
+    elif grid_type == "GL":
+        i1, i2, i3 = gl_tetra_triplets(alpha, N)
+        grid_1d, _ = gl_quadrature(alpha, N)
+    else:
+        print("Grid name {} currently unsupported.".format(grid_type))
+
+    num_weights = i1.shape[0]
+    grid = np.zeros((3, num_weights))
+    grid[0,:] = grid_1d[i1]
+    grid[1,:] = grid_1d[i2]
+    grid[2,:] = grid_1d[i3]
+
+    # Prepare orthogonal polynomials
+    M = N
+    while True:
+        # List of polynomial orders (p,q,r)
+        ps, qs, rs = poly_triplets_total_degree(M)
+        #ps, qs, rs = poly_triplets_individual_degree(M)
+        num_polys = ps.shape[0]
+
+        if num_polys > num_weights:
+            M -= 1
+            ps, qs, rs = poly_triplets_total_degree(M)
+            #ps, qs, rs = poly_triplets_individual_degree(M)
+            num_polys = ps.shape[0]
+            break
+        else:
+            M += 1
+
+    #M = 2 * N
+    #ps, qs, rs = poly_triplets_total_degree(M)
+    #num_polys = ps.shape[0]
+
+    print("M =", M, ", N =", N)
+
+    # Obtain orthonormalisation coefficients for the polynomials
+    ortho_L = orthonormal_polynomials(ps, qs, rs, alpha)
+    poly_ampl = np.copy(np.diag(ortho_L))
+    ortho_L /= np.sqrt(poly_ampl)[:,np.newaxis]
+
+    # Evaluations of the polynomials at grid points
+    grid_evals = grid_poly_evaluations(grid_1d, ps, qs, rs, i1, i2, i3)
+    grid_evals = np.matmul(ortho_L, grid_evals)
+
+    # Base value for the weights
+    tetra_volume = (1 - alpha ** 3) / 2.
+    base_weights = np.ones(num_weights) * tetra_volume / num_weights
+    
+    # Analytic values for the integrals
+    analytic = analytic_poly_integrals(ps, qs, rs, alpha)
+    analytic = np.matmul(ortho_L, analytic)
+
+    # We are now ready to compute the quadrature weights.
+    # Non-Negative Least Squares:
+    # minimise ||A x - b||^2 for non-negative x
+
+    print(len(ps), len(base_weights))
+
+    A = grid_evals
+    #b = np.concatenate([[1], np.zeros(num_polys-1)])
+    b = np.concatenate([[ortho_L[0,0]*tetra_volume], np.zeros(num_polys-1)])
+
+    x, rnorm = scipy.optimize.nnls(A, b)
+
+    weights = x
+
+    return grid, weights
+
+
+
+def unit_quadrature_qp(alpha, N, grid_type="Uniform"):
     ''' Returns a quadrature rule which has N grid points on each dimension.
     This should guarantee that the integral of
     symmetric polynomials of order <= f(N) over a tetrapyd is exact.
@@ -139,386 +220,6 @@ def unit_quadrature(alpha, N, grid_type="Uniform"):
     #qp_result = cvxopt.solvers.qp(qp_P, qp_q,initvals=qp_i)
     #qp_result = cvxopt.solvers.qp(qp_P, qp_q)
 
-    weights = np.array(qp_result["x"])
-
-    return grid, weights
-
-
-def unit_quadrature_nnls(alpha, N, grid_type="Uniform"):
-    ''' Returns a quadrature rule which has N grid points on each dimension.
-    Minimises the integration error of symmetric polynomials 
-    order <= f(N) over a tetrapyd specified by the triangle conditions and
-    alpha <= k1, k2, k3 <= 1
-    '''
-
-    # Set up grid points
-    if grid_type == "Uniform":
-        i1, i2, i3 = uni_tetra_triplets(alpha, N)
-        grid_1d = np.linspace(alpha, 1, N)
-    elif grid_type == "GL":
-        i1, i2, i3 = gl_tetra_triplets(alpha, N)
-        grid_1d, _ = gl_quadrature(alpha, N)
-    else:
-        print("Grid name {} currently unsupported.".format(grid_type))
-
-    num_weights = i1.shape[0]
-    grid = np.zeros((3, num_weights))
-    grid[0,:] = grid_1d[i1]
-    grid[1,:] = grid_1d[i2]
-    grid[2,:] = grid_1d[i3]
-
-    # Prepare orthogonal polynomials
-    M = N
-    while True:
-        # List of polynomial orders (p,q,r)
-        ps, qs, rs = poly_triplets_total_degree(M)
-        #ps, qs, rs = poly_triplets_individual_degree(M)
-        num_polys = ps.shape[0]
-
-        if num_polys > num_weights:
-            M -= 1
-            ps, qs, rs = poly_triplets_total_degree(M)
-            #ps, qs, rs = poly_triplets_individual_degree(M)
-            num_polys = ps.shape[0]
-            break
-        else:
-            M += 1
-
-    #M = 2 * N
-    #ps, qs, rs = poly_triplets_total_degree(M)
-    #num_polys = ps.shape[0]
-
-    print("M =", M, ", N =", N)
-
-    # Obtain orthonormalisation coefficients for the polynomials
-    ortho_L = orthonormal_polynomials(ps, qs, rs, alpha)
-    poly_ampl = np.copy(np.diag(ortho_L))
-    ortho_L /= np.sqrt(poly_ampl)[:,np.newaxis]
-
-    # Evaluations of the polynomials at grid points
-    grid_evals = grid_poly_evaluations(grid_1d, ps, qs, rs, i1, i2, i3)
-    grid_evals = np.matmul(ortho_L, grid_evals)
-
-    # Base value for the weights
-    tetra_volume = (1 - alpha ** 3) / 2.
-    base_weights = np.ones(num_weights) * tetra_volume / num_weights
-    
-    # Analytic values for the integrals
-    analytic = analytic_poly_integrals(ps, qs, rs, alpha)
-    analytic = np.matmul(ortho_L, analytic)
-
-    # We are now ready to compute the quadrature weights.
-    # Non-Negative Least Squares:
-    # minimise ||A x - b||^2 for non-negative x
-
-    print(len(ps), len(base_weights))
-
-    A = grid_evals
-    #b = np.concatenate([[1], np.zeros(num_polys-1)])
-    b = np.concatenate([[ortho_L[0,0]*tetra_volume], np.zeros(num_polys-1)])
-
-    x, rnorm = scipy.optimize.nnls(A, b)
-
-    weights = x
-
-    return grid, weights
-
-
-
-def old2_unit_quadrature(alpha, N):
-    ''' Returns a quadrature rule which guarantees that the integral of
-    symmetric polynomials of order <= N over a tetrapyd is exact.
-    Tetrapyd specified by the triangle conditions and
-    alpha <= k1, k2, k3 <= 1
-    '''
-
-    # List of polynomial orders (p,q,r) to get exact
-    ps, qs, rs = poly_triplets_total_degree(N)
-    #ps, qs, rs = poly_triplets_individual_degree(N)
-    num_constraints = ps.shape[0]
-
-    # List of polynomials for consideration
-    ps, qs, rs = poly_triplets_total_degree(N+1)
-    #ps, qs, rs = poly_triplets_individual_degree(N+1)
-    num_polys = ps.shape[0]
-
-    size_1d = N // 2
-
-    while True:
-        i1, i2, i3 = uni_tetra_triplets(alpha, size_1d)
-        #i1, i2, i3 = gl_tetra_triplets(alpha, size_1d)
-        num_weights = i1.shape[0]
-        if num_weights > num_constraints :
-            break
-        else:
-            size_1d += 1
-
-    size_1d = N + 1
-    #i1, i2, i3 = uni_tetra_triplets(alpha, size_1d)
-    i1, i2, i3 = gl_tetra_triplets(alpha, size_1d)
-    num_weights = i1.shape[0]
-
-    # Grid in each dimension
-    #grid_1d = np.linspace(alpha, 1, size_1d)
-    grid_1d, _ = gl_quadrature(alpha, size_1d)
-
-
-    # Create 3D grid
-    grid = np.zeros((3, num_weights))
-    grid[0,:] = grid_1d[i1]
-    grid[1,:] = grid_1d[i2]
-    grid[2,:] = grid_1d[i3]
-
-    # Symmetry factors for each grid points
-    sym_factor = np.ones(num_weights, dtype=int)
-    sym_factor[(i1 != i2) & (i2 != i3)] = 6
-    sym_factor[(i1 != i2) & (i2 == i3)] = 3
-    sym_factor[(i1 == i2) & (i2 != i3)] = 3
-
-    # Base value for the weights
-    tetra_volume = (1 - alpha ** 3) / 2.
-    base_weights = tetra_volume / num_weights * sym_factor
-
-    # Cross inner product between polynomials
-    cross_prod = np.zeros((num_polys, num_polys))
-
-    for n in range(num_polys):
-        p1, q1, r1 = ps[n], qs[n], rs[n]
-        p2, q2, r2 = ps[:n+1], qs[:n+1], rs[:n+1]
-        cross_prod[n,:n+1] = (analytic_poly_integrals(p1+p2, q1+q2, r1+r2, alpha)
-                        + analytic_poly_integrals(p1+p2, q1+r2, r1+q2, alpha)
-                        + analytic_poly_integrals(p1+q2, q1+p2, r1+r2, alpha)
-                        + analytic_poly_integrals(p1+q2, q1+r2, r1+p2, alpha)
-                        + analytic_poly_integrals(p1+r2, q1+p2, r1+q2, alpha)
-                        + analytic_poly_integrals(p1+r2, q1+q2, r1+p2, alpha)
-                            ) / 6
-    
-    cross_prod += cross_prod.T - np.diag(np.diag(cross_prod))   # Symmetrise
-
-    poly_ampl = np.diag(cross_prod)     # Inner product <p_n, p_n> for each n
-
-    # Below isn't numerically stable for larger Ns
-    '''
-    L = np.linalg.cholesky(cross_prod)
-    ortho_L = np.linalg.inv(L)
-    ortho_L /= np.sqrt(poly_ampl)[:,np.newaxis]
-    '''
-
-    C = np.zeros((num_polys, num_polys))
-    norms = np.zeros(num_polys)
-    C[0,0] = 1
-    norms[0] = cross_prod[0,0] ** (-0.5)
-
-    for n in range(num_polys):
-        tmp = norms[:n] ** 2 * np.matmul(C[:n,:n], cross_prod[n,:n])
-        C[n,:n] = -np.matmul(tmp[:], C[:n,:n])
-        C[n,n] = 1
-        #norms[n] = np.dot(cross_prod[n,:n+1], C[n,:n+1]) ** (-0.5)
-        norms[n] = np.dot(C[n,:n+1], np.matmul(cross_prod[:n+1,:n+1], C[n,:n+1])) ** (-0.5)
-    
-    print(norms)
-    
-    ortho_L = C[:,:] * norms[:,np.newaxis]
-    #ortho_L[0,0] /= cross_prod[0,0] ** 0.5
-    ortho_L /= np.sqrt(poly_ampl)[:,np.newaxis]
-    #print("New:", ortho_L)
-    #print("Old:", np.linalg.inv(np.linalg.cholesky(cross_prod)) / np.sqrt(poly_ampl)[:,np.newaxis])
-    
-#    # Matrix for orthonormalisation
-#    ortho_L = np.copy(cross_prod)
-#    ortho_L[:,:] /= -poly_ampl[np.newaxis,:]
-#    print(ortho_L)
-#    ortho_L += 2 * np.identity(num_polys)    # Change diagonal values from -1 to 1
-#    print(ortho_L)
-#
-#    # Normalise each polynomial
-#    for n in range(num_polys):
-#        x = ortho_L[n,:]
-#        ampl = np.dot(x, np.matmul(cross_prod, x))
-#        #ortho_L[n,:] /= np.sqrt(ampl)
-#    
-
-    # Analytic values for the integrals
-    analytic = analytic_poly_integrals(ps, qs, rs, alpha)
-    analytic = np.matmul(ortho_L, analytic)
-
-    # Evaluations of the polynomials at grid points
-    grid_evals = grid_poly_evaluations(grid_1d, ps, qs, rs, i1, i2, i3)
-    grid_evals = np.matmul(ortho_L, grid_evals)
-    #grid_evals[:,:] *= base_weights[np.newaxis,:]
-
-
-    # print("grid_1d:", grid_1d)
-    # print("ps:", ps)
-    # print("analytic:", analytic)
-    # print("grid_evals:", grid_evals)
-    # print("next_ps:", next_ps)
-    # print("next_analytic:", next_analytic)
-    # print("next_grid_evals:", next_grid_evals)
-    # print("n_weights:", n_weights)
-    # print("n_constraints:", n_constraints)
-    # print("grid_evals.shape = ", grid_evals.shape)
-    # print("rank(grid_evals) = ", np.linalg.matrix_rank(grid_evals))
-
-    # a = np.matmul(grid_evals.T, grid_evals)
-    # print("a.shape = ", a.shape)
-    # print("rank(a) = ", np.linalg.matrix_rank(a))
-
-    # if N >= 3:
-    #     grid_evals = grid_evals[1:,:]
-    #     analytic = analytic[1:]
-
-    # We are now ready to compute the quadrature weights.
-    # Quadratic Programming:
-    # minimise  (1/2) x^T P x + q^T x  subject to Gx <= h  and  Ax = b
-
-    n_c = num_constraints
-    print(len(ps), num_constraints, len(base_weights))
-
-    #'''
-    P = np.matmul(grid_evals[n_c:,:].T, grid_evals[n_c:,:])
-    P += np.max(np.abs(P)) * 1e-10 * np.identity(P.shape[0])
-    qp_P = cvxopt.matrix(P)
-    qp_q = cvxopt.matrix(-np.matmul(grid_evals[n_c:,:].T, analytic[n_c:]))
-    qp_G = cvxopt.matrix(-np.identity(len(base_weights)))
-    qp_h = cvxopt.matrix(np.zeros_like(base_weights))
-    #qp_A = cvxopt.matrix(grid_evals[1:n_c,:])
-    #qp_b = cvxopt.matrix(np.zeros(n_c-1))
-    qp_A = cvxopt.matrix(grid_evals[:n_c,:])
-    qp_b = cvxopt.matrix(np.concatenate([[1], np.zeros(n_c-1)]))
-    qp_i = cvxopt.matrix(base_weights)
-    #qp_i = cvxopt.matrix(np.ones_like(base_weights)/len(base_weights))
-
-    qp_result = cvxopt.solvers.qp(qp_P, qp_q, qp_G, qp_h, qp_A, qp_b, initvals=qp_i)
-    #qp_result = cvxopt.solvers.qp(qp_P, qp_q, qp_G, qp_h, qp_A, qp_b)
-    #qp_result = cvxopt.solvers.qp(qp_P, qp_q, A=qp_A, b=qp_b, initvals=qp_i)
-    #'''
-
-    '''
-    qp_P = cvxopt.matrix(np.matmul(grid_evals[1:,:].T, grid_evals[1:,:]))
-    qp_q = cvxopt.matrix(-np.matmul(grid_evals[1:,:].T, analytic[1:]))
-    '''
-
-    #qp_result = cvxopt.solvers.qp(qp_P, qp_q,initvals=qp_i)
-    #qp_result = cvxopt.solvers.qp(qp_P, qp_q)
-
-    weights = np.array(qp_result["x"])
-
-    return grid, weights
-
-
-
-def old_unit_quadrature(alpha, N):
-    ''' Returns a quadrature rule which guarantees that the integral of
-    symmetric polynomials of order <= N over a tetrapyd is exact.
-    Tetrapyd specified by the triangle conditions and
-    alpha <= k1, k2, k3 <= 1
-    '''
-
-    # List of polynomial orders (p,q,r) to get exact
-    ps, qs, rs = poly_triplets_individual_degree(N)
-    n_constraints = ps.shape[0]
-
-    size_1d = N
-    while True:
-        i1, i2, i3 = uni_tetra_triplets(alpha, size_1d)
-        if i1.shape[0] > n_constraints:
-            # Have enough degrees of freedom for the constraints
-            break
-        else:
-            size_1d += 1
-
-    # TEST!!
-    size_1d = 10
-    i1, i2, i3 = uni_tetra_triplets(alpha, size_1d-1)
-    
-    n_weights = i1.shape[0]
-
-    # Uniform grid in each dimension
-    grid_1d = np.linspace(alpha, 1, size_1d)
-
-    # Create 3D grid
-    grid = np.zeros((3, n_weights))
-    grid[0,:] = grid_1d[i1]
-    grid[1,:] = grid_1d[i2]
-    grid[2,:] = grid_1d[i3]
-
-    # Symmetry factors for each grid points
-    sym_factor = np.ones(n_weights, dtype=int)
-    sym_factor[(i1 != i2) & (i2 != i3)] = 6
-    sym_factor[(i1 != i2) & (i2 == i3)] = 3
-    sym_factor[(i1 == i2) & (i2 != i3)] = 3
-
-    # Base value for the weights
-    tetra_volume = (1 - alpha ** 3) / 2.
-    base_weights = tetra_volume / n_weights * sym_factor
-
-    # Analytic values for the integrals
-    analytic = analytic_poly_integrals(ps, qs, rs, alpha)
-
-    # Evaluations of the polynomials at grid points
-    grid_evals = grid_poly_evaluations(grid_1d, ps, qs, rs, i1, i2, i3)
-    #grid_evals[:,:] *= base_weights[np.newaxis,:]
-
-    # Next-order polynomial orders (p,q,r) to get as accurate as possible
-    next_ps, next_qs, next_rs = poly_triplets_individual_degree_next_order(N)
-
-    # Analytic values for those integrals
-    next_analytic = analytic_poly_integrals(next_ps, next_qs, next_rs, alpha)
-
-    # And their evaluations at grid points
-    next_grid_evals = grid_poly_evaluations(grid_1d, next_ps, next_qs, next_rs, i1, i2, i3)
-    #next_grid_evals[:,:] *= base_weights[np.newaxis,:]
-
-    # TEST ROUTINE
-    norms = np.sqrt(np.sum(base_weights[np.newaxis,:] * grid_evals ** 2, axis=1))
-    grid_evals /= norms[:,np.newaxis]
-    analytic /= norms[:]
-
-    print("grid_1d:", grid_1d)
-    print("ps:", ps)
-    print("analytic:", analytic)
-    print("grid_evals:", grid_evals)
-    print("next_ps:", next_ps)
-    print("next_analytic:", next_analytic)
-    print("next_grid_evals:", next_grid_evals)
-    print("n_weights:", n_weights)
-    print("n_constraints:", n_constraints)
-    print("grid_evals.shape = ", grid_evals.shape)
-    print("rank(grid_evals) = ", np.linalg.matrix_rank(grid_evals))
-
-    a = np.matmul(grid_evals.T, grid_evals)
-    print("a.shape = ", a.shape)
-    print("rank(a) = ", np.linalg.matrix_rank(a))
-
-    if N >= 3:
-        grid_evals = grid_evals[1:,:]
-        analytic = analytic[1:]
-
-
-    # We are now ready to compute the quadrature weights.
-    # Quadratic Programming:
-    # minimise  (1/2) x^T P x + q^T x  subject to Gx <= h  and  Ax = b
-
-    '''
-    qp_P = cvxopt.matrix(np.matmul(next_grid_evals.T, next_grid_evals))
-    qp_q = cvxopt.matrix(-np.matmul(next_grid_evals.T, next_analytic))
-    qp_G = cvxopt.matrix(-np.identity(n_weights))
-    qp_h = cvxopt.matrix(np.zeros(n_weights))
-    qp_A = cvxopt.matrix(grid_evals)
-    qp_b = cvxopt.matrix(analytic)
-    qp_i = cvxopt.matrix(base_weights)
-
-    #qp_result = cvxopt.solvers.qp(qp_P, qp_q, qp_G, qp_h, qp_A, qp_b, initvals=qp_i)
-    #qp_result = cvxopt.solvers.qp(qp_P, qp_q, A=qp_A, b=qp_b, initvals=qp_i)
-    '''
-    qp_P = cvxopt.matrix(np.matmul(grid_evals.T, grid_evals))
-    qp_q = cvxopt.matrix(-np.matmul(grid_evals.T, analytic))
-    #qp_i = cvxopt.matrix(base_weights)
-    #qp_i = cvxopt.matrix(np.ones_like(base_weights))
-
-    #qp_result = cvxopt.solvers.qp(qp_P, qp_q,initvals=qp_i)
-    qp_result = cvxopt.solvers.qp(qp_P, qp_q)
     weights = np.array(qp_result["x"])
 
     return grid, weights
