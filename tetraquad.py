@@ -44,7 +44,7 @@ def quadrature(k_min, k_max, N):
     return grid, weights
 
 
-def unit_quadrature_nnls(alpha, N, grid_type="Uniform"):
+def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True):
     ''' Returns a quadrature rule which has N grid points on each dimension.
     Minimises the integration error of symmetric polynomials 
     order <= f(N) over a tetrapyd specified by the triangle conditions and
@@ -53,19 +53,14 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform"):
 
     # Set up grid points
     if grid_type == "Uniform":
-        i1, i2, i3 = uni_tetra_triplets(alpha, N)
-        grid_1d = np.linspace(alpha, 1, N)
+        i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N, include_endpoints)
     elif grid_type == "GL":
-        i1, i2, i3 = gl_tetra_triplets(alpha, N)
-        grid_1d, _ = gl_quadrature(alpha, N)
+        i1, i2, i3, grid_1d = gl_tetra_triplets(alpha, N)
     else:
         print("Grid name {} currently unsupported.".format(grid_type))
 
     num_weights = i1.shape[0]
-    grid = np.zeros((3, num_weights))
-    grid[0,:] = grid_1d[i1]
-    grid[1,:] = grid_1d[i2]
-    grid[2,:] = grid_1d[i3]
+    grid = np.array([grid_1d[i1], grid_1d[i2], grid_1d[i3]])
 
     # Prepare orthogonal polynomials
     M = N
@@ -73,20 +68,18 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform"):
         # List of polynomial orders (p,q,r)
         ps, qs, rs = poly_triplets_total_degree(M)
         #ps, qs, rs = poly_triplets_individual_degree(M)
+        #ps, qs, rs = poly_triplets_total_degree_ns(M)
         num_polys = ps.shape[0]
 
         if num_polys > num_weights:
             M -= 1
             ps, qs, rs = poly_triplets_total_degree(M)
             #ps, qs, rs = poly_triplets_individual_degree(M)
+            #ps, qs, rs = poly_triplets_total_degree_ns(M)
             num_polys = ps.shape[0]
             break
         else:
             M += 1
-
-    #M = 2 * N
-    #ps, qs, rs = poly_triplets_total_degree(M)
-    #num_polys = ps.shape[0]
 
     print("M =", M, ", N =", N)
 
@@ -98,10 +91,6 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform"):
     # Evaluations of the polynomials at grid points
     grid_evals = grid_poly_evaluations(grid_1d, ps, qs, rs, i1, i2, i3)
     grid_evals = np.matmul(ortho_L, grid_evals)
-
-    # Base value for the weights
-    tetra_volume = (1 - alpha ** 3) / 2.
-    base_weights = np.ones(num_weights) * tetra_volume / num_weights
     
     # Analytic values for the integrals
     analytic = analytic_poly_integrals(ps, qs, rs, alpha)
@@ -111,13 +100,14 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform"):
     # Non-Negative Least Squares:
     # minimise ||A x - b||^2 for non-negative x
 
-    print(len(ps), len(base_weights))
+    print(num_polys, num_weights)
 
     A = grid_evals
-    #b = np.concatenate([[1], np.zeros(num_polys-1)])
+    tetra_volume = (1 - alpha ** 3) / 2.
     b = np.concatenate([[ortho_L[0,0]*tetra_volume], np.zeros(num_polys-1)])
 
     x, rnorm = scipy.optimize.nnls(A, b)
+    print("NNLS complete, rnorm {}".format(rnorm))
 
     weights = x
 
@@ -125,7 +115,7 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform"):
 
 
 
-def unit_quadrature_qp(alpha, N, grid_type="Uniform"):
+def unit_quadrature_qp(alpha, N, grid_type="Uniform", include_endpoints=True):
     ''' Returns a quadrature rule which has N grid points on each dimension.
     This should guarantee that the integral of
     symmetric polynomials of order <= f(N) over a tetrapyd is exact.
@@ -135,19 +125,14 @@ def unit_quadrature_qp(alpha, N, grid_type="Uniform"):
 
     # Set up grid points
     if grid_type == "Uniform":
-        i1, i2, i3 = uni_tetra_triplets(alpha, N)
-        grid_1d = np.linspace(alpha, 1, N)
+        i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N, include_endpoints)
     elif grid_type == "GL":
-        i1, i2, i3 = gl_tetra_triplets(alpha, N)
-        grid_1d, _ = gl_quadrature(alpha, N)
+        i1, i2, i3, grid_1d = gl_tetra_triplets(alpha, N)
     else:
         print("Grid name {} currently unsupported.".format(grid_type))
 
     num_weights = i1.shape[0]
-    grid = np.zeros((3, num_weights))
-    grid[0,:] = grid_1d[i1]
-    grid[1,:] = grid_1d[i2]
-    grid[2,:] = grid_1d[i3]
+    grid = np.array([grid_1d[i1], grid_1d[i2], grid_1d[i3]])
 
     # Prepare orthogonal polynomials
     M = N // 2
@@ -231,8 +216,7 @@ def uniform_tetrapyd_weights(alpha, N, MC_N_SAMPLES=5000):
     '''
 
     # Set up grid points
-    i1, i2, i3 = uni_tetra_triplets(alpha, N)
-    grid_1d = np.linspace(alpha, 1, N)
+    i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N)
     num_weights = i1.shape[0]
 
     grid = np.zeros((3, num_weights))
@@ -275,6 +259,25 @@ def uniform_tetrapyd_weights(alpha, N, MC_N_SAMPLES=5000):
     
     return grid, tetrapyd_weights
 
+
+def poly_pairs_inidividual_degree(N):
+    ''' List of pairs (p,q) such taht
+    N >= p >= q >= 0
+    '''
+    pairs = [[p,q] for p in range(N+1)
+                for q in range(p+1)]
+    
+    return np.array(pairs).T
+
+
+def poly_pairs_total_degree(N):
+    ''' List of pairs (p,q) such taht
+    N >= p >= q >= 0 and p + q <= N
+    '''
+    pairs = [[p, n-p] for n in range(N+1)
+                for p in range(n, (n-1)//2, -1)]
+    
+    return np.array(pairs).T
 
 
 def poly_triplets_individual_degree(N):
@@ -330,6 +333,26 @@ def poly_triplets_total_degree_next_order(N):
     return np.array(tuples).T
 
 
+def poly_triplets_total_degree_ns(N, ns=0.9660499):
+    ''' List of triplets (p,q,r) such that
+    (p >= q >= r >= 0 and  p + q + r <= N) OR
+    (p >= q >= 0 and r = ns-2 and p + q <= N).
+    '''
+
+    tuples = [[0, 0, 0]]
+
+    # r = ns-2
+    ps, qs = poly_pairs_total_degree(N)
+    tuples = tuples + [[p, q, ns-2] for p, q in zip(ps, qs) if p + q >= 2] 
+
+    # Decreasing p, q within each n = p + q + r
+    tuples = tuples + [[p, q, n-p-q] for n in range(1, N+1)
+                        for p in range(n, (n+2)//3-1, -1)
+                            for q in range(min(p, n-p), (n-p+1)//2-1, -1)]
+    
+    return np.array(tuples).T
+
+
 def gl_quadrature(alpha, N):
     # Gauss-Legendre quadrature on the interval [alpha, 1]
     gl_nodes, gl_weights = np.polynomial.legendre.leggauss(N)
@@ -339,19 +362,31 @@ def gl_quadrature(alpha, N):
     return k_grid, k_weights
 
 
-def uni_tetra_triplets(alpha, N):
+def uni_tetra_triplets(alpha, N, include_endpoints=True):
+    ''' Indices for a uniform grid inside the tetrapyd
+    satisfying 1 >= k1 >= k2 >= k3 >= alpha and k2 + k3 >= k1.
+    '''
 
-    k_grid = np.linspace(alpha, 1, N)
+    if include_endpoints:
+        k_grid = np.linspace(alpha, 1, N)
+    else:
+        dk = (1 - alpha) / N
+        k_grid = np.linspace(alpha+dk/2, 1-dk/2, N)
 
     tuples = [[i1, i2, i3] for i1 in range(N)
                 for i2 in range(i1+1)
                     for i3 in range(i2+1)
                         if k_grid[i2] + k_grid[i3] >= k_grid[i1]]
+    i1, i2, i3 = np.array(tuples).T
     
-    return np.array(tuples).T
+    return i1, i2, i3, k_grid
 
 
 def gl_tetra_triplets(alpha, N):
+    ''' Indices for a grid inside the tetrapyd where the grid points
+    come from (one-dimensional) Gauss-Legendre quadrature points.
+    Satisfies 1 >= k1 >= k2 >= k3 >= alpha and k2 + k3 >= k1.
+    '''
 
     k_grid, k_weights = gl_quadrature(alpha, N)
 
@@ -359,8 +394,9 @@ def gl_tetra_triplets(alpha, N):
                 for i2 in range(i1+1)
                     for i3 in range(i2+1)
                         if k_grid[i2] + k_grid[i3] >= k_grid[i1]]
+    i1, i2, i3 = np.array(tuples).T
     
-    return np.array(tuples).T
+    return i1, i2, i3, k_grid
 
 
 def analytic_poly_integrals(ps, qs, rs, alpha):
@@ -415,7 +451,7 @@ def poly_evaluations(p, q, r, k1, k2, k3):
 
 def orthonormal_polynomials(ps, qs, rs, alpha):
     ''' Orthonormalise the polynomials x^p y^q r^z on the unit tetrapyd (with alpha < 1).
-        Uses modified Gram-Schmidt orthogonalisation based on the analytic integral values
+        Uses modified Gram-Schmidt orthogonalisation based on the analytic integral values.
         Returns a lower-triangluer matrix L such that the nth row specifies
         the orthgonal coefficients for the nth polynomial with (p,q,r) = (ps[n], qs[n], rs[n]).
     '''
