@@ -9,7 +9,7 @@ k3 + k1 >= k2
 '''
 
 import numpy as np
-from scipy.special import gamma
+from scipy.special import gamma, beta, betainc, hyp2f1
 from numpy.random import default_rng
 import scipy
 import cvxopt
@@ -93,7 +93,7 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True):
     grid_evals = np.matmul(ortho_L, grid_evals)
     
     # Analytic values for the integrals
-    analytic = analytic_poly_integrals(ps, qs, rs, alpha)
+    analytic = analytic_poly_integrals_alpha(ps, qs, rs, alpha)
     analytic = np.matmul(ortho_L, analytic)
 
     # We are now ready to compute the quadrature weights.
@@ -103,7 +103,7 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True):
     print(num_polys, num_weights)
 
     A = grid_evals
-    tetra_volume = (1 - alpha ** 3) / 2.
+    tetra_volume = 0.5 - 3 * alpha ** 2 + 3 * alpha ** 3
     b = np.concatenate([[ortho_L[0,0]*tetra_volume], np.zeros(num_polys-1)])
 
     x, rnorm = scipy.optimize.nnls(A, b)
@@ -162,10 +162,11 @@ def unit_quadrature_qp(alpha, N, grid_type="Uniform", include_endpoints=True):
 
     # Base value for the weights
     tetra_volume = (1 - alpha ** 3) / 2.
+    tetra_volume = 0.5 - 3 * alpha ** 2 + 3 * alpha ** 3
     base_weights = np.ones(num_weights) * tetra_volume / num_weights
     
     # Analytic values for the integrals
-    analytic = analytic_poly_integrals(ps, qs, rs, alpha)
+    analytic = analytic_poly_integrals_alpha(ps, qs, rs, alpha)
     analytic = np.matmul(ortho_L, analytic)
 
     num_constraints = np.linalg.matrix_rank(grid_evals)
@@ -256,6 +257,10 @@ def uniform_tetrapyd_weights(alpha, N, MC_N_SAMPLES=5000):
     MC_weights = np.sum(((r1 + r2 >= r3) & (r2 + r3 >= r1) & (r3 + r1 >= r2)), axis=0) / MC_N_SAMPLES
     
     tetrapyd_weights[need_MC] *= MC_weights
+
+    # Make sure the overall volume is exact
+    tetra_volume = 0.5 - 3 * alpha ** 2 + 3 * alpha ** 3
+    tetrapyd_weights *= tetra_volume / np.sum(tetrapyd_weights)
     
     return grid, tetrapyd_weights
 
@@ -399,18 +404,79 @@ def gl_tetra_triplets(alpha, N):
     return i1, i2, i3, k_grid
 
 
-def analytic_poly_integrals(ps, qs, rs, alpha):
+def incomplete_beta(x, a, b):
+    ''' The incomplete beta function B(x; a, b) as defined in https://dlmf.nist.gov/8.17
+    Inputs a and b can be array-like, whereas x needs be a scalar.
+    '''
+    if np.abs(x) <= 1:
+        # Used scipy's regularised incomplete beta function 'betainc'
+        return beta(a, b) * betainc(a, b, x)
+    else:
+        # Use hyptergeometric function to compute the analytically-continued beta function
+        # See Equation (8.17.7) of https://dlmf.nist.gov/8.17
+        return (x ** a) / a * hyp2f1(a, 1-b, a+1, x)
+
+def generalised_incomplete_beta(x1, x2, a, b):
+    ''' The generalised incomplete beta function 
+    B(x1, x2; a, b) = B(x2; a, b) - B(x1; a, b)
+    '''
+    return incomplete_beta(x2, a, b) - incomplete_beta(x1, a, b)
+
+
+def analytic_poly_integrals(ps, qs, rs):
     ''' Analytic values for the integrals of
     (x^p * y^q + z^r  + (5 syms)) / 6.0
     (or equivalently, x^p * y^q * z^r)
-    over the tetrapyd.
+    over the tetrapyd with alpha = 0 (bounded below by zero).
     '''
 
     evals = 1 / ((1 + ps) * (1 + qs) * (1 + rs))
     evals -= gamma(1 + qs) * gamma(1 + rs) / ((3 + ps + qs + rs) * gamma(3 + qs + rs))
     evals -= gamma(1 + rs) * gamma(1 + ps) / ((3 + ps + qs + rs) * gamma(3 + rs + ps))
     evals -= gamma(1 + ps) * gamma(1 + qs) / ((3 + ps + qs + rs) * gamma(3 + ps + qs))
-    evals *= 1 - alpha ** (3 + ps + qs + rs)
+
+    return evals
+
+def analytic_poly_integrals_alpha(ps, qs, rs, alpha):
+    ''' Analytic values for the integrals of
+    (x^p * y^q + z^r  + (5 syms)) / 6.0
+    (or equivalently, x^p * y^q * z^r)
+    over the tetrapyd, bounded below by alpha, assumed to be less than 1/2.
+    See Wuhyun's notes for the derivation of this formula.
+    '''
+
+    a = alpha
+    b = 1 - a
+    p, q, r = ps, qs, rs
+
+    # alpha^(p+1)
+    ap1, aq1, ar1 = a ** (p+1), a ** (q+1), a ** (r+1)
+    # beta^(p+1)
+    bp1, bq1, br1 = b ** (p+1), b ** (q+1), b ** (r+1)
+
+    # B(x1, x2; a, b)
+    B = generalised_incomplete_beta
+
+    # Integral over the cube [alpha,1]^3
+    I_cube = (1-ap1) * (1-aq1) * (1-ar1) / ((p+1.) * (q+1.) * (r+1.))
+
+    # Integral over the volume inside the cube but outside the tetrapyd,
+    # where x >= y+z
+    I_x = B(a, b, q+1, r+1) / (p+q+r+3.) / (q+r+2.)
+    I_x -= (((r+1.) * ar1 * bq1 / (q+r+2.)) + ((q+1.) * aq1 * br1 / (q+r+2.)) - aq1 * ar1) / ((p+1.) * (q+1.) * (r+1.))
+    I_x += a**(p+q+r+3) * ((-1)**q * B(2, 1/a, p+2, q+1) + (-1)**r * B(2, 1/a, p+2, r+1)) / ((p+1.) * (p+q+r+3.))
+
+    # Same for y >= z+x
+    I_y = B(a, b, r+1, p+1) / (p+q+r+3.) / (r+p+2.)
+    I_y -= (((p+1.) * ap1 * br1 / (r+p+2.)) + ((r+1.) * ar1 * bp1 / (r+p+2.)) - ar1 * ap1) / ((p+1.) * (q+1.) * (r+1.))
+    I_y += a**(p+q+r+3) * ((-1)**r * B(2, 1/a, q+2, r+1) + (-1)**p * B(2, 1/a, q+2, p+1)) / ((q+1.) * (p+q+r+3.))
+
+    # Same for z >= x_y
+    I_z = B(a, b, p+1, q+1) / (p+q+r+3.) / (p+q+2.)
+    I_z -= (((q+1.) * aq1 * bp1 / (p+q+2.)) + ((p+1.) * ap1 * bq1 / (p+q+2.)) - ap1 * aq1) / ((p+1.) * (q+1.) * (r+1.))
+    I_z += a**(p+q+r+3) * ((-1)**p * B(2, 1/a, r+2, p+1) + (-1)**q * B(2, 1/a, r+2, q+1)) / ((r+1.) * (p+q+r+3.))
+
+    evals = I_cube - I_x - I_y - I_z
 
     return evals
 
@@ -449,6 +515,44 @@ def poly_evaluations(p, q, r, k1, k2, k3):
     return evals
 
 
+def analytic_sine_integrals(omegas, phis, alpha):
+    ''' Analytic values for the integrals of
+    f(x,y,z) = sin(omega * (x + y + z) + phi)
+    over the tetrapyd.
+    '''
+
+    fact =  1 / (4 * omegas ** 3)
+    evals = (9 * np.cos(phis + 2 * omegas) + 4 * np.cos(phis + 3 * omegas)
+             -4 * np.cos(phis + 3 * alpha * omegas) + 3 * np.cos(phis + 4 * alpha * omegas)
+             -12 * np.cos(phis + (2 + alpha) * omegas) + 6 * omegas * np.sin(phis + 2 * omegas)
+             -12 * alpha * omegas * np.sin(phis + 2 * omegas))
+    evals *= fact
+
+    return evals
+
+
+def grid_sine_evaluations(grid_1d, omegas, phis, i1, i2, i3):
+    ''' Computes the matrix containing the evaluations of
+    f(x,y,z) = sin(omega * (x + y + z) + phi)
+    at the grid points.
+    '''
+
+    eval_K = grid_1d[i1] + grid_1d[i2] + grid_1d[i3]
+    grid_evals = np.sin(omegas[:,np.newaxis] * eval_K[np.newaxis,:] + phis[:,np.newaxis])
+
+    return grid_evals
+
+
+def sine_evaluations(omega, phi, k1, k2, k3):
+    ''' Computes the matrix containing the evaluations of
+    f(x,y,z) = sin(omega * (k1 * k2 * k3) + phi)
+    '''
+
+    evals = np.sin(omega * (k1 + k2 + k3) + phi)
+
+    return evals
+
+
 def orthonormal_polynomials(ps, qs, rs, alpha):
     ''' Orthonormalise the polynomials x^p y^q r^z on the unit tetrapyd (with alpha < 1).
         Uses modified Gram-Schmidt orthogonalisation based on the analytic integral values.
@@ -464,12 +568,12 @@ def orthonormal_polynomials(ps, qs, rs, alpha):
     for n in range(num_polys):
         p1, q1, r1 = ps[n], qs[n], rs[n]
         p2, q2, r2 = ps[:n+1], qs[:n+1], rs[:n+1]
-        I[n,:n+1] = (analytic_poly_integrals(p1+p2, q1+q2, r1+r2, alpha)
-                        + analytic_poly_integrals(p1+p2, q1+r2, r1+q2, alpha)
-                        + analytic_poly_integrals(p1+q2, q1+p2, r1+r2, alpha)
-                        + analytic_poly_integrals(p1+q2, q1+r2, r1+p2, alpha)
-                        + analytic_poly_integrals(p1+r2, q1+p2, r1+q2, alpha)
-                        + analytic_poly_integrals(p1+r2, q1+q2, r1+p2, alpha)
+        I[n,:n+1] = (analytic_poly_integrals_alpha(p1+p2, q1+q2, r1+r2, alpha)
+                        + analytic_poly_integrals_alpha(p1+p2, q1+r2, r1+q2, alpha)
+                        + analytic_poly_integrals_alpha(p1+q2, q1+p2, r1+r2, alpha)
+                        + analytic_poly_integrals_alpha(p1+q2, q1+r2, r1+p2, alpha)
+                        + analytic_poly_integrals_alpha(p1+r2, q1+p2, r1+q2, alpha)
+                        + analytic_poly_integrals_alpha(p1+r2, q1+q2, r1+p2, alpha)
                             ) / 6
     
     I += I.T - np.diag(np.diag(I))   # Symmetrise
