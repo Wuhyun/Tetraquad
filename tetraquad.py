@@ -13,12 +13,13 @@ from scipy.special import gamma, beta, betainc, hyp2f1
 from numpy.random import default_rng
 import scipy
 import cvxopt
+import pandas as pd
 
 
-def quad(func, k_min, k_max, N=10, grid=None, weights=None):
+def quad(func, k_min=None, k_max=None, N=10, grid=None, weights=None):
     ''' Integrate the given function over a tetrapyd volume.
     May provide a precomputed quadrature rule (grid, weights) to
-    speed up the calculation.
+    speed up the calculations.
     '''
 
     if grid is None or weights is None:
@@ -31,20 +32,46 @@ def quad(func, k_min, k_max, N=10, grid=None, weights=None):
     return eval
 
 
-def quadrature(k_min, k_max, N):
+def quadrature(k_min, k_max, N, grid_type="Uniform", include_endpoints=True):
     ''' Returns a quadrature rule that guarantees the integral of
-    symmetric polynomials of order <= N over a tetrapyd is exact.
+    symmetric polynomials of order <= N over a tetrapyd is almost exact.
     '''
 
-    ratio = k_min / k_max
-    grid, weights = unit_quadrature_nnls(ratio, N)
+    alpha = k_min / k_max
+    grid, weights = unit_quadrature_nnls(alpha, N, grid_type, include_endpoints)
     grid *= k_max
-    weights *= ratio ** 3
+    weights *= k_max ** 3
 
     return grid, weights
 
 
-def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True):
+def save_quadrature(filename, k_min, k_max, N, grid_type="Uniform", include_endpoints=True):
+    ''' Computes and saves tetraquad rule in a Dataframe format
+    '''
+
+    alpha = k_min / k_max
+    grid, weights, i1, i2, i3, grid_1d = unit_quadrature_nnls(alpha, N, grid_type, include_endpoints, get_grid_indices=True)
+    grid *= k_max
+    weights *= k_max ** 3
+
+    df = pd.DataFrame({"i1": i1, "i2": i2, "i3": i3, "k1": grid[0], "k2": grid[1], "k3": grid[2],
+                            "weight": weights})
+
+    df.to_csv(filename, float_format="%.18e")
+
+
+def load_quadrature(filename):
+    ''' Loads tetraquad rule from a csv file
+    '''
+
+    df = pd.read_csv(filename)
+    grid = np.stack([df["k1"], df["k2"], df["k3"]], axis=0)
+    weights = df["weight"].to_numpy()
+
+    return grid, weights
+
+
+def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True, get_grid_indices=False):
     ''' Returns a quadrature rule which has N grid points on each dimension.
     Minimises the integration error of symmetric polynomials 
     order <= f(N) over a tetrapyd specified by the triangle conditions and
@@ -108,10 +135,19 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True):
 
     x, rnorm = scipy.optimize.nnls(A, b)
     print("NNLS complete, rnorm {}".format(rnorm))
+    weights = x.flatten()
 
-    weights = x
+    #nonzero_weights = (weights > 1e-6 * (tetra_volume / num_weights))
+    nonzero_weights = np.nonzero(weights)[0]
+    print("Out of {} weights, {} of them are nonzero".format(len(weights), len(nonzero_weights)))
+    grid = grid[:, nonzero_weights]
+    weights = weights[nonzero_weights]
 
-    return grid, weights
+    if get_grid_indices:
+        i1, i2, i3 = i1[nonzero_weights], i2[nonzero_weights], i3[nonzero_weights]
+        return grid, weights, i1, i2, i3, grid_1d
+    else:
+        return grid, weights
 
 
 
@@ -211,13 +247,13 @@ def unit_quadrature_qp(alpha, N, grid_type="Uniform", include_endpoints=True):
     return grid, weights
 
 
-def uniform_tetrapyd_weights(alpha, N, MC_N_SAMPLES=5000):
+def uniform_tetrapyd_weights(alpha, N, MC_N_SAMPLES=5000, include_endpoints=True):
     ''' Returns a uniform tetrapyd grid with weights proportional to 
-    the volume of the grid.
+    the volume of the grid point (voxel).
     '''
 
     # Set up grid points
-    i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N)
+    i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N, include_endpoints)
     num_weights = i1.shape[0]
 
     grid = np.zeros((3, num_weights))
@@ -227,9 +263,9 @@ def uniform_tetrapyd_weights(alpha, N, MC_N_SAMPLES=5000):
 
     # 1D bounds and weights for k grid points
     interval_bounds = np.zeros(N + 1)
-    interval_bounds[0] = grid_1d[0]
+    interval_bounds[0] = alpha
     interval_bounds[1:-1] = (grid_1d[:-1] + grid_1d[1:]) / 2
-    interval_bounds[-1] = grid_1d[-1]
+    interval_bounds[-1] = 1
     k_weights = np.diff(interval_bounds)
 
     # Initialise weights based on symmetry and grid intervals
@@ -240,8 +276,8 @@ def uniform_tetrapyd_weights(alpha, N, MC_N_SAMPLES=5000):
 
     # Further weights for points of the surface of the tetrapyd
     lb1, ub1 = interval_bounds[i1], interval_bounds[i1+1]   # upper and lower bounds of k1
-    lb2, ub2 = interval_bounds[i2], interval_bounds[i2+1]   # upper and lower bounds of k1
-    lb3, ub3 = interval_bounds[i3], interval_bounds[i3+1]   # upper and lower bounds of k1
+    lb2, ub2 = interval_bounds[i2], interval_bounds[i2+1]   # upper and lower bounds of k2
+    lb3, ub3 = interval_bounds[i3], interval_bounds[i3+1]   # upper and lower bounds of k3
     need_MC = (((lb1 + lb2 < ub3) & (ub1 + ub2 > lb3))      # The plane k1+k2-k3=0 intersects
                 | ((lb2 + lb3 < ub1) & (ub2 + ub3 > lb1))   # The plane -k1+k2+k3=0 intersects
                 | ((lb3 + lb1 < ub2) & (ub3 + ub1 > lb2)))  # The plane k1-k2+k3=0 intersects
@@ -253,16 +289,35 @@ def uniform_tetrapyd_weights(alpha, N, MC_N_SAMPLES=5000):
     r2 = rng.uniform(lb2[need_MC], ub2[need_MC], size=(MC_N_SAMPLES, MC_count))
     r3 = rng.uniform(lb3[need_MC], ub3[need_MC], size=(MC_N_SAMPLES, MC_count))
 
-    # Count the ratio of samples that lies inside the tetrapyd
-    MC_weights = np.sum(((r1 + r2 >= r3) & (r2 + r3 >= r1) & (r3 + r1 >= r2)), axis=0) / MC_N_SAMPLES
+    # Estimate the fraction of samples that lie inside the tetrapyd
+    in_tetra = ((r1 + r2 >= r3) & (r2 + r3 >= r1) & (r3 + r1 >= r2))
+    MC_weights = np.sum(in_tetra, axis=0) / MC_N_SAMPLES
     
     tetrapyd_weights[need_MC] *= MC_weights
 
     # Make sure the overall volume is exact
-    tetra_volume = 0.5 - 3 * alpha ** 2 + 3 * alpha ** 3
-    tetrapyd_weights *= tetra_volume / np.sum(tetrapyd_weights)
+    #tetra_volume = 0.5 - 3 * alpha ** 2 + 3 * alpha ** 3
+    #tetrapyd_weights *= tetra_volume / np.sum(tetrapyd_weights)
     
     return grid, tetrapyd_weights
+
+
+def save_uniform_quadrature(filename, k_min, k_max, N, MC_N_SAMPLES=1000000):
+    ''' Computes and saves the uniform quadrature where the weights are proportinal
+    to the grid (voxel) volume within tetrapyd.
+    '''
+
+    alpha = k_min / k_max
+    grid, weights = uniform_tetrapyd_weights(alpha, N, MC_N_SAMPLES)
+    grid *= k_max
+    weights *= k_max ** 3
+
+    i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N)
+
+    df = pd.DataFrame({"i1": i1, "i2": i2, "i3": i3, "k1": grid[0], "k2": grid[1], "k3": grid[2],
+                            "weight": weights})
+
+    df.to_csv(filename, float_format="%.18e")
 
 
 def poly_pairs_inidividual_degree(N):
@@ -367,9 +422,11 @@ def gl_quadrature(alpha, N):
     return k_grid, k_weights
 
 
-def uni_tetra_triplets(alpha, N, include_endpoints=True):
+def uni_tetra_triplets(alpha, N, include_endpoints=True, keep_borderline=True):
     ''' Indices for a uniform grid inside the tetrapyd
     satisfying 1 >= k1 >= k2 >= k3 >= alpha and k2 + k3 >= k1.
+    When keep_borderline is True, keep all the grid points that lie outside
+    the tetrapyd but has their voxel overlap with it.
     '''
 
     if include_endpoints:
@@ -377,12 +434,39 @@ def uni_tetra_triplets(alpha, N, include_endpoints=True):
     else:
         dk = (1 - alpha) / N
         k_grid = np.linspace(alpha+dk/2, 1-dk/2, N)
+    
 
-    tuples = [[i1, i2, i3] for i1 in range(N)
-                for i2 in range(i1+1)
-                    for i3 in range(i2+1)
-                        if k_grid[i2] + k_grid[i3] >= k_grid[i1]]
-    i1, i2, i3 = np.array(tuples).T
+    if not keep_borderline:
+        # The following can miss out some volume elements
+        tuples = [[i1, i2, i3] for i1 in range(N)
+                    for i2 in range(i1+1)
+                        for i3 in range(i2+1)
+                            if k_grid[i2] + k_grid[i3] >= k_grid[i1]]
+        i1, i2, i3 = np.array(tuples).T
+    
+    else:
+        # 1D bounds for k grid points
+        interval_bounds = np.zeros(N + 1)
+        interval_bounds[0] = alpha
+        interval_bounds[1:-1] = (k_grid[:-1] + k_grid[1:]) / 2
+        interval_bounds[-1] = 1
+
+        tuples = [[i1, i2, i3] for i1 in range(N)
+                    for i2 in range(i1+1)
+                        for i3 in range(i2+1)]
+        i1, i2, i3 = np.array(tuples).T
+
+        # Corners specifying the grid volume (voxel)
+        lb1, ub1 = interval_bounds[i1], interval_bounds[i1+1]   # upper and lower bounds of k1
+        lb2, ub2 = interval_bounds[i2], interval_bounds[i2+1]   # upper and lower bounds of k2
+        lb3, ub3 = interval_bounds[i3], interval_bounds[i3+1]   # upper and lower bounds of k3
+        inside = (k_grid[i2] + k_grid[i3] >= k_grid[i1])
+        borderline = (((lb1 + lb2 < ub3) & (ub1 + ub2 > lb3))      # The plane k1+k2-k3=0 intersects
+                    | ((lb2 + lb3 < ub1) & (ub2 + ub3 > lb1))   # The plane -k1+k2+k3=0 intersects
+                    | ((lb3 + lb1 < ub2) & (ub3 + ub1 > lb2)))  # The plane k1-k2+k3=0 intersects
+        keep = (inside | borderline)
+
+        i1, i2, i3 = i1[keep], i2[keep], i3[keep]
     
     return i1, i2, i3, k_grid
 
@@ -414,13 +498,25 @@ def incomplete_beta(x, a, b):
     else:
         # Use hyptergeometric function to compute the analytically-continued beta function
         # See Equation (8.17.7) of https://dlmf.nist.gov/8.17
-        return (x ** a) / a * hyp2f1(a, 1-b, a+1, x)
+        #return (x ** a) / a * hyp2f1(a, 1-b, a+1, x)
+        #print("F({},{};{};{}) = {}".format(a+b, 1, a+1, x, hyp2f1(a+b,1,a+1,x)))
+        
+        #return ((0.+x) ** a) * ((1.-x) ** b) / a * hyp2f1(a+b, 1., a+1., x)
+        return np.power(x, a) * np.power(1.-x, b) / a * hyp2f1(a+b, 1., a+1., x)
+
+
 
 def generalised_incomplete_beta(x1, x2, a, b):
     ''' The generalised incomplete beta function 
     B(x1, x2; a, b) = B(x2; a, b) - B(x1; a, b)
     '''
     return incomplete_beta(x2, a, b) - incomplete_beta(x1, a, b)
+
+    #b1 = incomplete_beta(x1, a, b)
+    #b2 = incomplete_beta(x2, a, b)
+    #print("B({};{},{}) = {}".format(x1, a, b, b1))
+    #print("B({};{},{}) = {}".format(x2, a, b, b2))
+    #return b2-b1
 
 
 def analytic_poly_integrals(ps, qs, rs):
@@ -464,17 +560,20 @@ def analytic_poly_integrals_alpha(ps, qs, rs, alpha):
     # where x >= y+z
     I_x = B(a, b, q+1, r+1) / (p+q+r+3.) / (q+r+2.)
     I_x -= (((r+1.) * ar1 * bq1 / (q+r+2.)) + ((q+1.) * aq1 * br1 / (q+r+2.)) - aq1 * ar1) / ((p+1.) * (q+1.) * (r+1.))
-    I_x += a**(p+q+r+3) * ((-1)**q * B(2, 1/a, p+2, q+1) + (-1)**r * B(2, 1/a, p+2, r+1)) / ((p+1.) * (p+q+r+3.))
+    I_x += a**(p+q+r+3) * ((-1)**q * B(2, 1./a, p+2, q+1) + (-1)**r * B(2, 1./a, p+2, r+1)) / ((p+1.) * (p+q+r+3.))
+    #I_x += a**(p+q+r+3) * np.real((-1.+0j)**q * B(2., 1./a, p+2, q+1) + (-1.+0j)**r * B(2., 1./a, p+2, r+1)) / ((p+1.) * (p+q+r+3.))
 
     # Same for y >= z+x
     I_y = B(a, b, r+1, p+1) / (p+q+r+3.) / (r+p+2.)
     I_y -= (((p+1.) * ap1 * br1 / (r+p+2.)) + ((r+1.) * ar1 * bp1 / (r+p+2.)) - ar1 * ap1) / ((p+1.) * (q+1.) * (r+1.))
-    I_y += a**(p+q+r+3) * ((-1)**r * B(2, 1/a, q+2, r+1) + (-1)**p * B(2, 1/a, q+2, p+1)) / ((q+1.) * (p+q+r+3.))
+    I_y += a**(p+q+r+3) * ((-1)**r * B(2, 1./a, q+2, r+1) + (-1)**p * B(2, 1./a, q+2, p+1)) / ((q+1.) * (p+q+r+3.))
+    #I_y += a**(p+q+r+3) * np.real((-1.+0j)**r * B(2., 1./a, q+2, r+1) + (-1.+0j)**p * B(2., 1./a, q+2, p+1)) / ((q+1.) * (p+q+r+3.))
 
     # Same for z >= x_y
     I_z = B(a, b, p+1, q+1) / (p+q+r+3.) / (p+q+2.)
     I_z -= (((q+1.) * aq1 * bp1 / (p+q+2.)) + ((p+1.) * ap1 * bq1 / (p+q+2.)) - ap1 * aq1) / ((p+1.) * (q+1.) * (r+1.))
-    I_z += a**(p+q+r+3) * ((-1)**p * B(2, 1/a, r+2, p+1) + (-1)**q * B(2, 1/a, r+2, q+1)) / ((r+1.) * (p+q+r+3.))
+    I_z += a**(p+q+r+3) * ((-1)**p * B(2, 1./a, r+2, p+1) + (-1)**q * B(2, 1./a, r+2, q+1)) / ((r+1.) * (p+q+r+3.))
+    #I_z += a**(p+q+r+3) * np.real((-1.+0j)**p * B(2., 1./a, r+2, p+1) + (-1.+0j)**q * B(2., 1./a, r+2, q+1)) / ((r+1.) * (p+q+r+3.))
 
     evals = I_cube - I_x - I_y - I_z
 
