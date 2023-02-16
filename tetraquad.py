@@ -14,6 +14,7 @@ from numpy.random import default_rng
 import scipy
 import cvxopt
 import pandas as pd
+import mpmath
 
 
 def quad(func, k_min=None, k_max=None, N=10, grid=None, weights=None):
@@ -45,12 +46,12 @@ def quadrature(k_min, k_max, N, grid_type="Uniform", include_endpoints=True):
     return grid, weights
 
 
-def save_quadrature(filename, k_min, k_max, N, grid_type="Uniform", include_endpoints=True):
+def save_quadrature(filename, k_min, k_max, N, grid_type="Uniform", include_endpoints=True, negative_power=None):
     ''' Computes and saves tetraquad rule in a Dataframe format
     '''
 
     alpha = k_min / k_max
-    grid, weights, i1, i2, i3, grid_1d = unit_quadrature_nnls(alpha, N, grid_type, include_endpoints, get_grid_indices=True)
+    grid, weights, i1, i2, i3, grid_1d = unit_quadrature_nnls(alpha, N, grid_type, include_endpoints, get_grid_indices=True, negative_power=negative_power)
     grid *= k_max
     weights *= k_max ** 3
 
@@ -71,11 +72,13 @@ def load_quadrature(filename):
     return grid, weights
 
 
-def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True, get_grid_indices=False):
+def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True, get_grid_indices=False, negative_power=None):
     ''' Returns a quadrature rule which has N grid points on each dimension.
     Minimises the integration error of symmetric polynomials 
     order <= f(N) over a tetrapyd specified by the triangle conditions and
     alpha <= k1, k2, k3 <= 1
+    If negative_power is not None, additionally include symmetric polynomials with one power equal to that value.
+    E.g. negative_power = ns - 2
     '''
 
     # Set up grid points
@@ -93,14 +96,14 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True, 
     M = N
     while True:
         # List of polynomial orders (p,q,r)
-        ps, qs, rs = poly_triplets_total_degree(M)
+        ps, qs, rs = poly_triplets_total_degree(M, negative_power)
         #ps, qs, rs = poly_triplets_individual_degree(M)
         #ps, qs, rs = poly_triplets_total_degree_ns(M)
         num_polys = ps.shape[0]
 
         if num_polys > num_weights:
             M -= 1
-            ps, qs, rs = poly_triplets_total_degree(M)
+            ps, qs, rs = poly_triplets_total_degree(M, negative_power)
             #ps, qs, rs = poly_triplets_individual_degree(M)
             #ps, qs, rs = poly_triplets_total_degree_ns(M)
             num_polys = ps.shape[0]
@@ -359,20 +362,31 @@ def poly_triplets_individual_degree_next_order(N):
     
     return np.array(tuples).T
 
-def poly_triplets_total_degree(N):
+def poly_triplets_total_degree(N, negative_power=None):
     ''' List of triplets (p,q,r) such that
     p >= q >= r >= 0 and  p + q + r <= N
+    If negative_power is not None, additionally include (p,q,r)s with
+    p >= q >= 0, r = negative_power, and p + q <= N.
     '''
 
-    # Increasing p, q within each n = p + q + r 
-    #tuples = [[p, q, n-p-q] for n in range(N+1)
-    #                 for p in range((n+2)//3, n+1)
-    #                    for q in range((n-p+1)//2, min(p+1, n-p+1))]
+    if negative_power is None:
+        # Increasing p, q within each n = p + q + r 
+        #tuples = [[p, q, n-p-q] for n in range(N+1)
+        #                 for p in range((n+2)//3, n+1)
+        #                    for q in range((n-p+1)//2, min(p+1, n-p+1))]
 
-    # Decreasing p, q within each n = p + q + r
-    tuples = [[p, q, n-p-q] for n in range(N+1)
-                     for p in range(n, (n+2)//3-1, -1)
-                        for q in range(min(p, n-p), (n-p+1)//2-1, -1)]
+        # Decreasing p, q within each n = p + q + r
+        tuples = [[p, q, n-p-q] for n in range(N+1)
+                        for p in range(n, (n+2)//3-1, -1)
+                            for q in range(min(p, n-p), (n-p+1)//2-1, -1)]
+
+    else: 
+        tuples = [[0, 0, 0]]    # (0,0,0) always comes first
+        tuples = tuples + [[p, n-p, negative_power] for n in range(N+1)
+                                        for p in range(n, (n-1)//2, -1)]
+        tuples = tuples + [[p, q, n-p-q] for n in range(1, N+1)
+                                for p in range(n, (n+2)//3-1, -1)
+                                    for q in range(min(p, n-p), (n-p+1)//2-1, -1)]
     
     return np.array(tuples).T
 
@@ -510,7 +524,24 @@ def generalised_incomplete_beta(x1, x2, a, b):
     ''' The generalised incomplete beta function 
     B(x1, x2; a, b) = B(x2; a, b) - B(x1; a, b)
     '''
-    return incomplete_beta(x2, a, b) - incomplete_beta(x1, a, b)
+    a, b = np.array(a), np.array(b)
+
+    int_ab = (a % 1 == 0) & (b % 1 == 0)
+    if np.sum(int_ab) == a.size:
+        # Powers a, b are integers
+        return incomplete_beta(x2, a, b) - incomplete_beta(x1, a, b)
+    else:
+        result = np.zeros(a.size, dtype=complex) 
+
+        # Normal method for integer powers
+        if np.sum(int_ab) > 0:
+            result[int_ab] = incomplete_beta(x2, a[int_ab], b[int_ab]) - incomplete_beta(x1, a[int_ab], b[int_ab])
+
+        # Use mpmath for non-integer powers
+        nint_ab = np.invert(int_ab)
+        result[nint_ab] = np.array([complex(mpmath.betainc(av, bv, x1, x2)) for av, bv in zip(a[nint_ab], b[nint_ab])])
+
+        return result
 
     #b1 = incomplete_beta(x1, a, b)
     #b2 = incomplete_beta(x2, a, b)
@@ -541,9 +572,23 @@ def analytic_poly_integrals_alpha(ps, qs, rs, alpha):
     See Wuhyun's notes for the derivation of this formula.
     '''
 
+    if alpha == 0:
+        return analytic_poly_integrals(ps, qs, rs)
+
     a = alpha
     b = 1 - a
-    p, q, r = ps, qs, rs
+
+    evals = np.zeros(len(ps))
+
+    # Prevent overflow errors from large p+q+r
+    #ignore_alpha = (alpha ** (ps+qs+rs) < 1e-200)
+    ignore_alpha = ((ps+qs+rs) > np.log(1e-200) / np.log(alpha))
+    evals[ignore_alpha] = analytic_poly_integrals(ps[ignore_alpha], qs[ignore_alpha], rs[ignore_alpha])
+
+    do_alpha = np.invert(ignore_alpha)
+    p, q, r = ps[do_alpha], qs[do_alpha], rs[do_alpha]
+
+    evals_alpha = np.zeros(len(do_alpha))
 
     # alpha^(p+1)
     ap1, aq1, ar1 = a ** (p+1), a ** (q+1), a ** (r+1)
@@ -560,22 +605,24 @@ def analytic_poly_integrals_alpha(ps, qs, rs, alpha):
     # where x >= y+z
     I_x = B(a, b, q+1, r+1) / (p+q+r+3.) / (q+r+2.)
     I_x -= (((r+1.) * ar1 * bq1 / (q+r+2.)) + ((q+1.) * aq1 * br1 / (q+r+2.)) - aq1 * ar1) / ((p+1.) * (q+1.) * (r+1.))
-    I_x += a**(p+q+r+3) * ((-1)**q * B(2, 1./a, p+2, q+1) + (-1)**r * B(2, 1./a, p+2, r+1)) / ((p+1.) * (p+q+r+3.))
-    #I_x += a**(p+q+r+3) * np.real((-1.+0j)**q * B(2., 1./a, p+2, q+1) + (-1.+0j)**r * B(2., 1./a, p+2, r+1)) / ((p+1.) * (p+q+r+3.))
+    #I_x += a**(p+q+r+3) * ((-1)**q * B(2, 1./a, p+2, q+1) + (-1)**r * B(2, 1./a, p+2, r+1)) / ((p+1.) * (p+q+r+3.))
+    I_x += a**(p+q+r+3) * np.real((-1.+0j)**q * B(2, 1/a, p+2, q+1) + (-1.+0j)**r * B(2, 1/a, p+2, r+1)) / ((p+1.) * (p+q+r+3.))
 
     # Same for y >= z+x
     I_y = B(a, b, r+1, p+1) / (p+q+r+3.) / (r+p+2.)
     I_y -= (((p+1.) * ap1 * br1 / (r+p+2.)) + ((r+1.) * ar1 * bp1 / (r+p+2.)) - ar1 * ap1) / ((p+1.) * (q+1.) * (r+1.))
-    I_y += a**(p+q+r+3) * ((-1)**r * B(2, 1./a, q+2, r+1) + (-1)**p * B(2, 1./a, q+2, p+1)) / ((q+1.) * (p+q+r+3.))
-    #I_y += a**(p+q+r+3) * np.real((-1.+0j)**r * B(2., 1./a, q+2, r+1) + (-1.+0j)**p * B(2., 1./a, q+2, p+1)) / ((q+1.) * (p+q+r+3.))
+    #I_y += a**(p+q+r+3) * ((-1)**r * B(2, 1./a, q+2, r+1) + (-1)**p * B(2, 1./a, q+2, p+1)) / ((q+1.) * (p+q+r+3.))
+    I_y += a**(p+q+r+3) * np.real((-1.+0j)**r * B(2, 1/a, q+2, r+1) + (-1.+0j)**p * B(2, 1/a, q+2, p+1)) / ((q+1.) * (p+q+r+3.))
 
     # Same for z >= x_y
     I_z = B(a, b, p+1, q+1) / (p+q+r+3.) / (p+q+2.)
     I_z -= (((q+1.) * aq1 * bp1 / (p+q+2.)) + ((p+1.) * ap1 * bq1 / (p+q+2.)) - ap1 * aq1) / ((p+1.) * (q+1.) * (r+1.))
-    I_z += a**(p+q+r+3) * ((-1)**p * B(2, 1./a, r+2, p+1) + (-1)**q * B(2, 1./a, r+2, q+1)) / ((r+1.) * (p+q+r+3.))
-    #I_z += a**(p+q+r+3) * np.real((-1.+0j)**p * B(2., 1./a, r+2, p+1) + (-1.+0j)**q * B(2., 1./a, r+2, q+1)) / ((r+1.) * (p+q+r+3.))
+    #I_z += a**(p+q+r+3) * ((-1)**p * B(2, 1./a, r+2, p+1) + (-1)**q * B(2, 1./a, r+2, q+1)) / ((r+1.) * (p+q+r+3.))
+    I_z += a**(p+q+r+3) * np.real((-1.+0j)**p * B(2, 1/a, r+2, p+1) + (-1.+0j)**q * B(2, 1/a, r+2, q+1)) / ((r+1.) * (p+q+r+3.))
 
-    evals = I_cube - I_x - I_y - I_z
+    evals_alpha = I_cube - I_x - I_y - I_z
+
+    evals[do_alpha] = np.real(evals_alpha[:])
 
     return evals
 
@@ -674,6 +721,9 @@ def orthonormal_polynomials(ps, qs, rs, alpha):
                         + analytic_poly_integrals_alpha(p1+r2, q1+p2, r1+q2, alpha)
                         + analytic_poly_integrals_alpha(p1+r2, q1+q2, r1+p2, alpha)
                             ) / 6
+    
+    print("I=", I)
+    print("ps=", ps, "qs=", qs, "rs=", rs)
     
     I += I.T - np.diag(np.diag(I))   # Symmetrise
 
