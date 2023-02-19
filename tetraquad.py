@@ -121,10 +121,6 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True, 
     # Evaluations of the polynomials at grid points
     grid_evals = grid_poly_evaluations(grid_1d, ps, qs, rs, i1, i2, i3)
     grid_evals = np.matmul(ortho_L, grid_evals)
-    
-    # Analytic values for the integrals
-    analytic = analytic_poly_integrals_alpha(ps, qs, rs, alpha)
-    analytic = np.matmul(ortho_L, analytic)
 
     # We are now ready to compute the quadrature weights.
     # Non-Negative Least Squares:
@@ -564,6 +560,7 @@ def analytic_poly_integrals(ps, qs, rs):
 
     return evals
 
+
 def analytic_poly_integrals_alpha(ps, qs, rs, alpha):
     ''' Analytic values for the integrals of
     (x^p * y^q + z^r  + (5 syms)) / 6.0
@@ -625,6 +622,95 @@ def analytic_poly_integrals_alpha(ps, qs, rs, alpha):
     evals[do_alpha] = np.real(evals_alpha[:])
 
     return evals
+
+
+def analytic_poly_cross_product_alpha(ps, qs, rs, alpha):
+    ''' Returns a matrix containing cross inner products of
+    (x^p * y^q + z^r  + (5 syms)) / 6.0
+    over the tetrapyd domain bounded below by alpha (<0.5).
+    Optimised for this special purpose.
+    '''
+
+    # Arrays need be int for indexing purposes
+    ps = np.round(ps).astype(int)
+    qs = np.round(qs).astype(int)
+    rs = np.round(rs).astype(int)
+
+    # Shorthand definitions
+    a = alpha
+    b = 1 - a
+    p_max = np.max(ps)
+    max_power = 2 * p_max + 2
+
+    # Precompute B(a, b; p, q) for 1 <= p, q <= max_power
+    # Since a + b = 1, B(a, b; p, q) is symmteric in p and q
+    pre_beta_a_b = np.zeros((max_power+1, max_power+1))
+    for p in range(1, max_power+1):
+        # Scipy's normalised incomplete beta function
+        q = np.arange(1, p+1)
+        pre_beta_a_b[p,1:p+1] = beta(p, q) * (betainc(p, q, b) - betainc(p, q, a))
+    # Symmetrise matrix
+    pre_beta_a_b += pre_beta_a_b.T - np.diag(np.diag(pre_beta_a_b))
+
+    # Precompute (a**(p+q) * (-1)**q) * B(2, 1/a; p, q)
+    pre_beta_2_ainv = np.zeros((max_power+1, max_power+1))
+    for p in range(1, max_power+1):
+        f2, fainv = np.power(2.*a, p) / p, 1. / p
+        q = np.arange(1, max_power+1)
+        # Scipy's hypergeometric function
+        #B(x;p,q) = np.power(x, p) * np.power(1.-x, q) / p * hyp2f1(p+q, 1., p+1., x)
+        pre_beta_2_ainv[p,1:] = (fainv * np.power(1.-a, q) * hyp2f1(p+q, 1, p+1, 1/a)
+                                    - f2 * np.power(a, q) * hyp2f1(p+q, 1, p+1, 2))
+    
+    print("B(a,b)=", pre_beta_a_b)
+    print("B(2,1/a)=", pre_beta_2_ainv)
+
+    print("Betas precomputed")
+
+    num_polys = len(ps)
+    cross_prod = np.zeros((num_polys, num_polys))
+
+    for n in range(num_polys):
+        p1, q1, r1 = ps[n], qs[n], rs[n]
+        p2, q2, r2 = ps[:n+1], qs[:n+1], rs[:n+1]
+        perms = [(p1+p2, q1+q2, r1+r2), (p1+p2, q1+r2, r1+q2),
+                 (p1+q2, q1+p2, r1+r2), (p1+q2, q1+r2, r1+p2),
+                 (p1+r2, q1+p2, r1+q2), (p1+r2, q1+q2, r1+p2)]
+
+        for p, q, r in perms:
+            # alpha^(p+1)
+            ap1, aq1, ar1 = a ** (p+1), a ** (q+1), a ** (r+1)
+            # beta^(p+1)
+            bp1, bq1, br1 = b ** (p+1), b ** (q+1), b ** (r+1)
+
+            # Integral over the cube [alpha,1]^3
+            I_cube = (1-ap1) * (1-aq1) * (1-ar1) / ((p+1.) * (q+1.) * (r+1.))
+
+            # Integral over the volume inside the cube but outside the tetrapyd,
+            # where x >= y+z
+            I_x = pre_beta_a_b[q+1,r+1] / (p+q+r+3.) / (q+r+2.)
+            I_x -= (((r+1.) * ar1 * bq1 / (q+r+2.)) + ((q+1.) * aq1 * br1 / (q+r+2.)) - aq1 * ar1) / ((p+1.) * (q+1.) * (r+1.))
+            #I_x += a**(p+q+r+3) * ((-1) * pre_beta_2_ainv[p+2,q+1] + (-1) * pre_beta_2_ainv[p+2,r+1]) / ((p+1.) * (p+q+r+3.))
+            I_x -= (ar1 * pre_beta_2_ainv[p+2,q+1] + aq1 * pre_beta_2_ainv[p+2,r+1]) / (a * (p+1.) * (p+q+r+3.))
+
+            # Same for y >= z+x
+            I_y = pre_beta_a_b[r+1,p+1] / (p+q+r+3.) / (r+p+2.)
+            I_y -= (((p+1.) * ap1 * br1 / (r+p+2.)) + ((r+1.) * ar1 * bp1 / (r+p+2.)) - ar1 * ap1) / ((p+1.) * (q+1.) * (r+1.))
+            #I_y += a**(p+q+r+3) * ((-1) * pre_beta_2_ainv[q+2,r+1] + (-1) * pre_beta_2_ainv[q+2,p+1]) / ((q+1.) * (p+q+r+3.))
+            I_y -= (ap1 * pre_beta_2_ainv[q+2,r+1] + ar1 * pre_beta_2_ainv[q+2,p+1]) / (a * (q+1.) * (p+q+r+3.))
+
+            # Same for z >= x_y
+            I_z = pre_beta_a_b[p+1,q+1] / (p+q+r+3.) / (p+q+2.)
+            I_z -= (((q+1.) * aq1 * bp1 / (p+q+2.)) + ((p+1.) * ap1 * bq1 / (p+q+2.)) - ap1 * aq1) / ((p+1.) * (q+1.) * (r+1.))
+            #I_z += a**(p+q+r+3) * ((-1) * pre_beta_2_ainv[r+2,p+1] + (-1) * pre_beta_2_ainv[r+2,q+1]) / ((r+1.) * (p+q+r+3.))
+            I_z -= (aq1 * pre_beta_2_ainv[r+2,p+1] + ap1 * pre_beta_2_ainv[r+2,q+1]) / (a * (r+1.) * (p+q+r+3.))
+
+            cross_prod[n,:n+1] += (I_cube - I_x - I_y - I_z) / 6
+
+    # Symmetrise
+    cross_prod += cross_prod.T - np.diag(np.diag(cross_prod))
+
+    return cross_prod
 
 
 def grid_poly_evaluations(grid_1d, ps, qs, rs, i1, i2, i3):
@@ -709,23 +795,30 @@ def orthonormal_polynomials(ps, qs, rs, alpha):
     num_polys = ps.shape[0]
 
     # Cross inner product between polynomials
-    I = np.zeros((num_polys, num_polys))
+    if True:
+        # New routine, should be more efficient
+        I = analytic_poly_cross_product_alpha(ps, qs, rs, alpha)
 
-    for n in range(num_polys):
-        p1, q1, r1 = ps[n], qs[n], rs[n]
-        p2, q2, r2 = ps[:n+1], qs[:n+1], rs[:n+1]
-        I[n,:n+1] = (analytic_poly_integrals_alpha(p1+p2, q1+q2, r1+r2, alpha)
-                        + analytic_poly_integrals_alpha(p1+p2, q1+r2, r1+q2, alpha)
-                        + analytic_poly_integrals_alpha(p1+q2, q1+p2, r1+r2, alpha)
-                        + analytic_poly_integrals_alpha(p1+q2, q1+r2, r1+p2, alpha)
-                        + analytic_poly_integrals_alpha(p1+r2, q1+p2, r1+q2, alpha)
-                        + analytic_poly_integrals_alpha(p1+r2, q1+q2, r1+p2, alpha)
-                            ) / 6
-    
+    else:
+        # Legacy routine, not used for now.
+        I = np.zeros((num_polys, num_polys))
+
+        for n in range(num_polys):
+            p1, q1, r1 = ps[n], qs[n], rs[n]
+            p2, q2, r2 = ps[:n+1], qs[:n+1], rs[:n+1]
+            I[n,:n+1] = (analytic_poly_integrals_alpha(p1+p2, q1+q2, r1+r2, alpha)
+                            + analytic_poly_integrals_alpha(p1+p2, q1+r2, r1+q2, alpha)
+                            + analytic_poly_integrals_alpha(p1+q2, q1+p2, r1+r2, alpha)
+                            + analytic_poly_integrals_alpha(p1+q2, q1+r2, r1+p2, alpha)
+                            + analytic_poly_integrals_alpha(p1+r2, q1+p2, r1+q2, alpha)
+                            + analytic_poly_integrals_alpha(p1+r2, q1+q2, r1+p2, alpha)
+                                ) / 6
+        
+        print("I=", I)
+        print("ps=", ps, "qs=", qs, "rs=", rs)
+        
+        I += I.T - np.diag(np.diag(I))   # Symmetrise
     print("I=", I)
-    print("ps=", ps, "qs=", qs, "rs=", rs)
-    
-    I += I.T - np.diag(np.diag(I))   # Symmetrise
 
     C = np.zeros((num_polys, num_polys))
     N = np.zeros(num_polys)
