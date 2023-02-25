@@ -46,19 +46,19 @@ def quadrature(k_min, k_max, N, grid_type="Uniform", include_endpoints=True):
     return grid, weights
 
 
-def save_quadrature(filename, k_min, k_max, N, grid_type="Uniform", include_endpoints=True, negative_power=None):
+def save_quadrature(save_path, k_min, k_max, N, grid_type="Uniform", include_endpoints=True, negative_power=None):
     ''' Computes and saves tetraquad rule in a Dataframe format
     '''
 
     alpha = k_min / k_max
-    grid, weights, i1, i2, i3, grid_1d = unit_quadrature_nnls(alpha, N, grid_type, include_endpoints, get_grid_indices=True, negative_power=negative_power)
+    grid, weights, i1, i2, i3, grid_1d = unit_quadrature_nnls(alpha, N, grid_type, include_endpoints, get_grid_indices=True, negative_power=negative_power, save_path=save_path)
     grid *= k_max
     weights *= k_max ** 3
 
     df = pd.DataFrame({"i1": i1, "i2": i2, "i3": i3, "k1": grid[0], "k2": grid[1], "k3": grid[2],
                             "weight": weights})
 
-    df.to_csv(filename, float_format="%.18e")
+    df.to_csv(save_path+".csv", float_format="%.18e")
 
 
 def load_quadrature(filename):
@@ -71,8 +71,12 @@ def load_quadrature(filename):
 
     return grid, weights
 
+def tetrapyd_volume(k_min, k_max):
+    alpha = k_max / k_min
+    return (0.5 - 3 * alpha ** 2 + 3 * alpha ** 3) * (k_max ** 3)
 
-def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True, get_grid_indices=False, negative_power=None):
+
+def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True, get_grid_indices=False, negative_power=None, save_path=None):
     ''' Returns a quadrature rule which has N grid points on each dimension.
     Minimises the integration error of symmetric polynomials 
     order <= f(N) over a tetrapyd specified by the triangle conditions and
@@ -83,17 +87,22 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True, 
 
     # Set up grid points
     if grid_type == "Uniform":
-        i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N, include_endpoints)
+        #i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N, include_endpoints)
+        i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N, include_endpoints, keep_borderline=False)
     elif grid_type == "GL":
         i1, i2, i3, grid_1d = gl_tetra_triplets(alpha, N)
     else:
         print("Grid name {} currently unsupported.".format(grid_type))
 
+    if save_path is not None:
+        np.savetxt(save_path+"_k_grid.txt", grid_1d)
+
     num_weights = i1.shape[0]
     grid = np.array([grid_1d[i1], grid_1d[i2], grid_1d[i3]])
 
     # Prepare orthogonal polynomials
-    M = N
+    M = 2 * N
+    '''
     while True:
         # List of polynomial orders (p,q,r)
         ps, qs, rs = poly_triplets_total_degree(M, negative_power)
@@ -110,11 +119,21 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True, 
             break
         else:
             M += 1
+    '''
+    # TEST!!
+    if negative_power is None:
+        ps, qs, rs = poly_triplets_total_degree(M)
+    else:
+        ps, qs, rs = poly_triplets_individual_degree(M, negative_power)
+    num_polys = ps.shape[0]
 
     print("M =", M, ", N =", N)
 
     # Obtain orthonormalisation coefficients for the polynomials
-    ortho_L = orthonormal_polynomials(ps, qs, rs, alpha)
+    ortho_L = orthonormal_polynomials(ps, qs, rs, alpha, negative_power)
+    if save_path is not None:
+        np.save(save_path+"_ortho_L.npy", ortho_L)
+
     poly_ampl = np.copy(np.diag(ortho_L))
     ortho_L /= np.sqrt(poly_ampl)[:,np.newaxis]
 
@@ -131,6 +150,11 @@ def unit_quadrature_nnls(alpha, N, grid_type="Uniform", include_endpoints=True, 
     A = grid_evals
     tetra_volume = 0.5 - 3 * alpha ** 2 + 3 * alpha ** 3
     b = np.concatenate([[ortho_L[0,0]*tetra_volume], np.zeros(num_polys-1)])
+
+    print("TEST FACTOR INCLUDED!!")
+    fact = np.sqrt(np.sum(A * A, axis=1))
+    A = A / fact[:,np.newaxis]
+    b = b / fact
 
     x, rnorm = scipy.optimize.nnls(A, b)
     print("NNLS complete, rnorm {}".format(rnorm))
@@ -339,15 +363,28 @@ def poly_pairs_total_degree(N):
     return np.array(pairs).T
 
 
-def poly_triplets_individual_degree(N):
+def poly_triplets_individual_degree(N, negative_power=None):
     ''' List of triplets (p,q,r) such that
     N >= p >= q >= r >= 0 
+    If negative_power is not None,
+    p, q, r are drawn from {negative_power, 0, 1, 2, ..., N-1}, 
+    and p >= q >= r.
     '''
-    tuples = [[p, q, r] for p in range(N+1)
-                for q in range(p+1)
-                    for r in range(q+1)]
-    
-    return np.array(tuples).T
+
+    if negative_power is None:
+        tuples = [[p, q, r] for p in range(N+1)
+                    for q in range(p+1)
+                        for r in range(q+1)]
+        
+        return np.array(tuples).T
+
+    else:
+        res = poly_triplets_individual_degree(N, negative_power=None)
+        res = res - 1.
+        res[res < -0.5] = negative_power
+
+        return res
+
 
 def poly_triplets_individual_degree_next_order(N):
     ''' List of triplets (p,q,r) such that
@@ -357,6 +394,7 @@ def poly_triplets_individual_degree_next_order(N):
                     for r in range(q+1)]
     
     return np.array(tuples).T
+
 
 def poly_triplets_total_degree(N, negative_power=None):
     ''' List of triplets (p,q,r) such that
@@ -521,6 +559,8 @@ def generalised_incomplete_beta(x1, x2, a, b):
     B(x1, x2; a, b) = B(x2; a, b) - B(x1; a, b)
     '''
     a, b = np.array(a), np.array(b)
+    if x1 == 2:
+        x1 = x1 + 1e-10     # Ad-hoc, avoid badness at x1=b=2
 
     int_ab = (a % 1 == 0) & (b % 1 == 0)
     if np.sum(int_ab) == a.size:
@@ -653,17 +693,27 @@ def analytic_poly_cross_product_alpha(ps, qs, rs, alpha):
     pre_beta_a_b += pre_beta_a_b.T - np.diag(np.diag(pre_beta_a_b))
 
     # Precompute (a**(p+q) * (-1)**q) * B(2, 1/a; p, q)
+    cut = int(np.ceil(np.log(1e-200) / np.log(a)))   # Ignore this term for p+q > cut
     pre_beta_2_ainv = np.zeros((max_power+1, max_power+1))
-    for p in range(1, max_power+1):
+    for p in range(1, min(max_power+1, cut)):
         f2, fainv = np.power(2.*a, p) / p, 1. / p
-        q = np.arange(1, max_power+1)
-        # Scipy's hypergeometric function
         #B(x;p,q) = np.power(x, p) * np.power(1.-x, q) / p * hyp2f1(p+q, 1., p+1., x)
-        pre_beta_2_ainv[p,1:] = (fainv * np.power(1.-a, q) * hyp2f1(p+q, 1, p+1, 1/a)
+        # Scipy's hypergeometric function
+        q = np.arange(1, min(max_power+1, cut+1-p))
+        pre_beta_2_ainv[p,q] = (fainv * np.power(1.-a, q) * hyp2f1(p+q, 1, p+1, 1/a)
                                     - f2 * np.power(a, q) * hyp2f1(p+q, 1, p+1, 2))
-    
-    print("B(a,b)=", pre_beta_a_b)
-    print("B(2,1/a)=", pre_beta_2_ainv)
+        '''
+        mpmath.mp.dps = 30
+        for q in range(1, max_power+1):
+            print("!")
+            pre_beta_2_ainv[p,q] = (fainv * np.power(1.-a, q) * float(mpmath.hyp2f1(p+q, 1, p+1, 1/a).real)
+                                        - f2 * np.power(a, q) * float(mpmath.hyp2f1(p+q, 1, p+1, 2)).real)
+            # Note that F(a,b;c;z) = (1-z)**(-a) F(a,c-b;c;z/(z-1))
+            #pre_beta_2_ainv[p,q] = (a ** (p+q)) * ((-1) ** q) * float(mpmath.betainc(p, q, x1=2, x2=1/a).real)
+        '''
+
+    #print("B(a,b)=", pre_beta_a_b)
+    #print("B(2,1/a)=", pre_beta_2_ainv)
 
     print("Betas precomputed")
 
@@ -704,6 +754,211 @@ def analytic_poly_cross_product_alpha(ps, qs, rs, alpha):
             I_z -= (((q+1.) * aq1 * bp1 / (p+q+2.)) + ((p+1.) * ap1 * bq1 / (p+q+2.)) - ap1 * aq1) / ((p+1.) * (q+1.) * (r+1.))
             #I_z += a**(p+q+r+3) * ((-1) * pre_beta_2_ainv[r+2,p+1] + (-1) * pre_beta_2_ainv[r+2,q+1]) / ((r+1.) * (p+q+r+3.))
             I_z -= (aq1 * pre_beta_2_ainv[r+2,p+1] + ap1 * pre_beta_2_ainv[r+2,q+1]) / (a * (r+1.) * (p+q+r+3.))
+
+            cross_prod[n,:n+1] += (I_cube - I_x - I_y - I_z) / 6
+
+    # Symmetrise
+    cross_prod += cross_prod.T - np.diag(np.diag(cross_prod))
+
+    return cross_prod
+
+
+def analytic_poly_cross_product_alpha_ns(ps, qs, rs, alpha, negative_power):
+    ''' Returns a matrix containing cross inner products of
+    (x^p * y^q + z^r  + (5 syms)) / 6.0
+    over the tetrapyd domain bounded below by alpha (<0.5).
+    ps, qs, rs are either non-negative integers or 'negative_power', often ns-2.
+    Optimised for this special purpose.
+    '''
+
+    p_max = int(np.round(np.max(ps)))
+    max_power = 2 * p_max + 2
+    M = max_power + 1
+    mpmath.mp.dps = 15
+
+    # For the convenience of coding, we replace all negative powers with
+    # a sufficiently large integer M.
+    # Arrays need be int for indexing purposes
+    def replace_negative(arr, new_value):
+        replaced = np.copy(arr)
+        replaced[replaced < 0] = new_value
+        return np.round(replaced).astype(int)
+
+    pinds = replace_negative(ps, M)
+    qinds = replace_negative(qs, M)
+    rinds = replace_negative(rs, M)
+
+    # Shorthand definitions
+    a = alpha
+    b = 1 - alpha
+    v = negative_power
+
+    # Precompute B(a, b; p, q) for 1 <= p, q <= max_power
+    # Since a + b = 1, B(a, b; p, q) is symmteric in p and q
+    pre_beta_a_b = np.zeros((2 * M + 3, 2 * M + 3))
+    for p in range(1, max_power+1):
+        # Scipy's normalised incomplete beta function
+        q = np.arange(1, p+1)
+        pre_beta_a_b[p,1:p+1] = beta(p, q) * (betainc(p, q, b) - betainc(p, q, a))
+
+    # Symmetrise matrix
+    pre_beta_a_b += pre_beta_a_b.T - np.diag(np.diag(pre_beta_a_b))
+
+    # Precompute betas with negative powers in 
+    for p in range(1, max_power+1):
+        for q in range(1, max_power+1):
+            # B(a, b; v+p, q)
+            pre_beta_a_b[M+p,q] = float(mpmath.betainc(v+p, q, x1=a, x2=b).real)
+            # B(a, b; p, v+q)
+            pre_beta_a_b[p,M+q] = float(mpmath.betainc(p, v+q, x1=a, x2=b).real)
+            # B(a, b; v+p, v+q)
+            pre_beta_a_b[M+p,M+q] = float(mpmath.betainc(v+p, v+q, x1=a, x2=b).real)
+        for q in range(1, 3):
+            # B(a, b; p, 2*v+q)
+            pre_beta_a_b[p,2*M+q] = float(mpmath.betainc(p, 2*v+q, x1=a, x2=b).real)
+            # B(a, b; v+p, 2*v+q)
+            pre_beta_a_b[M+p,2*M+q] = float(mpmath.betainc(v+p, 2*v+q, x1=a, x2=b).real)
+    for p in range(1, 3):
+        for q in range(1, max_power+1):
+            # B(a, b; 2*v+p, q)
+            pre_beta_a_b[2*M+p,q] = float(mpmath.betainc(2*v+p, q, x1=a, x2=b).real)
+            # B(a, b; 2*v+p, v+q)
+            pre_beta_a_b[2*M+p,M+q] = float(mpmath.betainc(2*v+p, v+q, x1=a, x2=b).real)
+        for q in range(1, 3):
+            # B(a, b; 2*v+p, 2*v+q)
+            pre_beta_a_b[2*M+p,2*M+q] = float(mpmath.betainc(2*v+p, 2*v+q, x1=a, x2=b).real)
+    
+    # Precompute (a**(p+q) * (-1)**q) * B(2, 1/a; p, q)
+    cut = int(np.ceil(np.log(1e-200) / np.log(a)))   # Ignore this term for p+q > cut
+    pre_beta_2_ainv = np.zeros((2 * M + 3, 2 * M + 3))
+    '''
+    for p in range(1, min(max_power+1, cut)):
+        f2, fainv = np.power(2.*a, p) / p, 1. / p
+        #B(x;p,q) = np.power(x, p) * np.power(1.-x, q) / p * hyp2f1(p+q, 1., p+1., x)
+        # Scipy's hypergeometric function
+        q = np.arange(1, min(max_power+1, cut+1-p))
+        pre_beta_2_ainv[p,q] = (fainv * np.power(1.-a, q) * hyp2f1(p+q, 1, p+1, 1/a)
+                                    - f2 * np.power(a, q) * hyp2f1(p+q, 1, p+1, 2))
+    '''
+
+    def beta_2_ainv(p, q):
+        f2, fainv = np.power(2.*a, p) / p, 1. / p
+        return float((fainv * np.power(b, q) * mpmath.hyp2f1(p+q, 1, p+1, 1/a)
+                            - f2 * np.power(a, q) * mpmath.hyp2f1(p+q, 1, p+1, 2)).real)
+
+    # Same betas with negative powers in
+    for p in range(1, min(max_power+1, cut)):
+        for q in range(1, min(max_power+1, cut+1-p)):
+            # B(a, b; p, q)
+            #pre_beta_2_ainv[p,q] = beta_2_ainv(p, q)
+            f2, fainv = np.power(2.*a, p) / p, 1. / p
+            pre_beta_2_ainv[p,q] = float((fainv * np.power(b, q) * mpmath.hyp2f1(p+q, 1, p+1, 1/a)
+                                           - f2 * np.power(a, q) * mpmath.hyp2f1(p+q, 1, p+1, 2+1e-7)).real)
+            # B(a, b; v+p, q)
+            pre_beta_2_ainv[M+p,q] = beta_2_ainv(v+p, q)
+            # B(a, b; p, v+q)
+            pre_beta_2_ainv[p,M+q] = beta_2_ainv(p, v+q)
+            # B(a, b; v+p, v+q)
+            pre_beta_2_ainv[M+p,M+q] = beta_2_ainv(v+p, v+q)
+        for q in range(1, 3):
+            # B(a, b; p, 2*v+q)
+            pre_beta_2_ainv[p,2*M+q] = beta_2_ainv(p, 2*v+q)
+            # B(a, b; v+p, 2*v+q)
+            pre_beta_2_ainv[M+p,2*M+q] = beta_2_ainv(v+p, 2*v+q)
+    for p in range(1, 3):
+        for q in range(1, min(max_power+1, cut+1-p)):
+            # B(a, b; 2*v+p, q)
+            pre_beta_2_ainv[2*M+p,q] = beta_2_ainv(2*v+p, q)
+            # B(a, b; 2*v+p, v+q)
+            pre_beta_2_ainv[2*M+p,M+q] = beta_2_ainv(2*v+p, v+q)
+        for q in range(1, 3):
+            # B(a, b; 2*v+p, 2*v+q)
+            pre_beta_2_ainv[2*M+p,2*M+q] = beta_2_ainv(2*v+p, 2*v+q)
+
+    '''
+    # Same betas with negative powers in
+    for p in range(1, min(max_power+1, cut)):
+        for q in range(1, min(max_power+1, cut+1-p)):
+            # B(a, b; p, q)
+            pre_beta_2_ainv[p,q] = float((np.power(a, p+q) * np.power(-1+0j, q) * mpmath.betainc(p, q, x1=2+1e-6, x2=1/a)).real)
+            # B(a, b; v+p, q)
+            pre_beta_2_ainv[M+p,q] = float((np.power(a, v+p+q) * np.power(-1+0j, q) * mpmath.betainc(v+p, q, x1=2, x2=1/a)).real)
+            # B(a, b; p, v+q)
+            pre_beta_2_ainv[p,M+q] = float((np.power(a, p+v+q) * np.power(-1+0j, v+q) * mpmath.betainc(p, v+q, x1=2, x2=1/a)).real)
+            # B(a, b; v+p, v+q)
+            pre_beta_2_ainv[M+p,M+q] = float((np.power(a, v+p+v+q) * np.power(-1+0j, v+q) * mpmath.betainc(v+p, v+q, x1=2, x2=1/a)).real)
+        for q in range(1, 3):
+            # B(a, b; p, 2*v+q)
+            pre_beta_2_ainv[p,2*M+q] = float((np.power(a, p+2*v+q) * np.power(-1+0j, 2*v+q) * mpmath.betainc(p, 2*v+q, x1=2, x2=1/a)).real)
+            # B(a, b; v+p, 2*v+q)
+            pre_beta_2_ainv[M+p,2*M+q] = float((np.power(a, v+p+2*v+q) * np.power(-1+0j, 2*v+q) * mpmath.betainc(v+p, 2*v+q, x1=2, x2=1/a)).real)
+    for p in range(1, 3):
+        for q in range(1, min(max_power+1, cut+1-p)):
+            # B(a, b; 2*v+p, q)
+            pre_beta_2_ainv[2*M+p,q] = float((np.power(a, 2*v+p+q) * np.power(-1+0j, q) * mpmath.betainc(2*v+p, q, x1=2, x2=1/a)).real)
+            # B(a, b; 2*v+p, v+q)
+            pre_beta_2_ainv[2*M+p,M+q] = float((np.power(a, 2*v+p+v+q) * np.power(-1+0j, v+q) * mpmath.betainc(2*v+p, v+q, x1=2, x2=1/a)).real)
+        for q in range(1, 3):
+            # B(a, b; 2*v+p, 2*v+q)
+            pre_beta_2_ainv[2*M+p,2*M+q] = float((np.power(a, 2*v+p+2*v+q) * np.power(-1+0j, 2*v+q) * mpmath.betainc(2*v+p, 2*v+q, x1=2, x2=1/a)).real)
+    '''
+
+    #print("B(a,b)=", pre_beta_a_b)
+    #print("B(2,1/a)=", pre_beta_2_ainv)
+    #print(pre_beta_2_ainv.shape)
+
+    print("Betas precomputed")
+
+    num_polys = len(ps)
+    cross_prod = np.zeros((num_polys, num_polys))
+
+    for n in range(num_polys):
+        p1, q1, r1 = ps[n], qs[n], rs[n]
+        p2, q2, r2 = ps[:n+1], qs[:n+1], rs[:n+1]
+        perms = [(p1+p2, q1+q2, r1+r2), (p1+p2, q1+r2, r1+q2),
+                 (p1+q2, q1+p2, r1+r2), (p1+q2, q1+r2, r1+p2),
+                 (p1+r2, q1+p2, r1+q2), (p1+r2, q1+q2, r1+p2)]
+                    
+        # Indices array are used for referencing precomputed betas
+        pi1, qi1, ri1 = pinds[n], qinds[n], rinds[n]
+        pi2, qi2, ri2 = pinds[:n+1], qinds[:n+1], rinds[:n+1]
+        iperms = [(pi1+pi2, qi1+qi2, ri1+ri2), (pi1+pi2, qi1+ri2, ri1+qi2),
+                 (pi1+qi2, qi1+pi2, ri1+ri2), (pi1+qi2, qi1+ri2, ri1+pi2),
+                 (pi1+ri2, qi1+pi2, ri1+qi2), (pi1+ri2, qi1+qi2, ri1+pi2)]
+
+        for perm in range(len(perms)):
+            p, q, r = perms[perm]
+            pi, qi, ri = iperms[perm]
+
+            # alpha^(p+1)
+            ap1, aq1, ar1 = a ** (p+1), a ** (q+1), a ** (r+1)
+            # beta^(p+1)
+            bp1, bq1, br1 = b ** (p+1), b ** (q+1), b ** (r+1)
+
+            # Integral over the cube [alpha,1]^3
+            I_cube = (1-ap1) * (1-aq1) * (1-ar1) / ((p+1.) * (q+1.) * (r+1.))
+
+            # Integral over the volume inside the cube but outside the tetrapyd,
+            # where x >= y+z
+            I_x = pre_beta_a_b[qi+1,ri+1] / (p+q+r+3.) / (q+r+2.)
+            I_x -= (((r+1.) * ar1 * bq1 / (q+r+2.)) + ((q+1.) * aq1 * br1 / (q+r+2.)) - aq1 * ar1) / ((p+1.) * (q+1.) * (r+1.))
+            #I_x += a**(p+q+r+3) * ((-1) * pre_beta_2_ainv[p+2,q+1] + (-1) * pre_beta_2_ainv[p+2,r+1]) / ((p+1.) * (p+q+r+3.))
+            I_x -= (ar1 * pre_beta_2_ainv[pi+2,qi+1] + aq1 * pre_beta_2_ainv[pi+2,ri+1]) / (a * (p+1.) * (p+q+r+3.))
+
+            # Same for y >= z+x
+            I_y = pre_beta_a_b[ri+1,pi+1] / (p+q+r+3.) / (r+p+2.)
+            I_y -= (((p+1.) * ap1 * br1 / (r+p+2.)) + ((r+1.) * ar1 * bp1 / (r+p+2.)) - ar1 * ap1) / ((p+1.) * (q+1.) * (r+1.))
+            #I_y += a**(p+q+r+3) * ((-1) * pre_beta_2_ainv[q+2,r+1] + (-1) * pre_beta_2_ainv[q+2,p+1]) / ((q+1.) * (p+q+r+3.))
+            I_y -= (ap1 * pre_beta_2_ainv[qi+2,ri+1] + ar1 * pre_beta_2_ainv[qi+2,pi+1]) / (a * (q+1.) * (p+q+r+3.))
+
+            # Same for z >= x_y
+            I_z = pre_beta_a_b[pi+1,qi+1] / (p+q+r+3.) / (p+q+2.)
+            I_z -= (((q+1.) * aq1 * bp1 / (p+q+2.)) + ((p+1.) * ap1 * bq1 / (p+q+2.)) - ap1 * aq1) / ((p+1.) * (q+1.) * (r+1.))
+            #I_z += a**(p+q+r+3) * ((-1) * pre_beta_2_ainv[r+2,p+1] + (-1) * pre_beta_2_ainv[r+2,q+1]) / ((r+1.) * (p+q+r+3.))
+            I_z -= (aq1 * pre_beta_2_ainv[ri+2,pi+1] + ap1 * pre_beta_2_ainv[ri+2,qi+1]) / (a * (r+1.) * (p+q+r+3.))
+            
+            #print(f"I_cube({pi},{qi},{ri})={I_cube}")
+            #print(f"I_x({pi},{qi},{ri})={I_x}")
 
             cross_prod[n,:n+1] += (I_cube - I_x - I_y - I_z) / 6
 
@@ -785,7 +1040,7 @@ def sine_evaluations(omega, phi, k1, k2, k3):
     return evals
 
 
-def orthonormal_polynomials(ps, qs, rs, alpha):
+def orthonormal_polynomials(ps, qs, rs, alpha, negative_power=None):
     ''' Orthonormalise the polynomials x^p y^q r^z on the unit tetrapyd (with alpha < 1).
         Uses modified Gram-Schmidt orthogonalisation based on the analytic integral values.
         Returns a lower-triangluer matrix L such that the nth row specifies
@@ -797,7 +1052,11 @@ def orthonormal_polynomials(ps, qs, rs, alpha):
     # Cross inner product between polynomials
     if True:
         # New routine, should be more efficient
-        I = analytic_poly_cross_product_alpha(ps, qs, rs, alpha)
+        if negative_power is None:
+            I = analytic_poly_cross_product_alpha(ps, qs, rs, alpha)
+        else:
+            I = analytic_poly_cross_product_alpha_ns(ps, qs, rs, alpha, negative_power)
+
 
     else:
         # Legacy routine, not used for now.
