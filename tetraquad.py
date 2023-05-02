@@ -14,13 +14,14 @@ from numpy.random import default_rng
 import scipy
 import pandas as pd
 import mpmath
+import matplotlib.pyplot as plt
 
 class Quadrature:
     ''' Class for storing the results of a 'Tetraquad' quadrature rule.
         Contains helper functions for handling quadrature objects.
     '''
 
-    def __init__(self, k_min=None, k_max=None, quad_type="tetraquad", N=30, **kwargs):
+    def __init__(self, k_min=None, k_max=None, quad_type="tetraquad", N=15, **kwargs):
         self.k_min = k_min
         self.k_max = k_max
         self.quad_type = quad_type
@@ -30,26 +31,40 @@ class Quadrature:
             # Base "Tetraquad" quadrature
             self.alpha = k_min / k_max
             self.include_endpoints = kwargs.get("include_endpoints", True)
+            self.N = N
+            self.M = kwargs.get("M", None)
 
             # Compute the quadrature for k_max = 1 and rescale
-            grid, weights = unit_quadrature_nnls(self.alpha, N, include_endpoints=self.include_endpoints)
+            grid, weights = unit_quadrature_nnls(self.alpha, N, M=self.M, include_endpoints=self.include_endpoints)
             self.grid = k_max * grid
             self.weights = (k_max ** 3) * weights
         
         elif quad_type == "uniform":
             # Uniform quadrature - 3D trapezoidal rule
-            pass
+            self.alpha = k_min / k_max
+            self.include_endpoints = kwargs.get("include_endpoints", True)
+            self.MC_n_samples = kwargs.get("MC_n_samples", 10000)
+            self.use_COM = kwargs.get("use_COM", False)
+
+            # Compute the quadrature for k_max = 1 and rescale
+            grid, weights = uniform_tetrapyd_weights(self.alpha, N, MC_n_samples=self.MC_n_samples,
+                                                     include_endpoints=self.include_endpoints,
+                                                     use_COM=self.use_COM)
+            self.grid = k_max * grid
+            self.weights = (k_max ** 3) * weights
         
         elif quad_type == "saved":
             # Loaded from a csv file
             # Currently, the output file does not contain the full infromation...
             # TODO: use a better input/output file format and remove this
             self.grid = kwargs.get("grid")
-            self.eweights = kwargs.get("weights")
+            self.weights = kwargs.get("weights")
             
     
     def integrate(self, integrand):
         ''' Integrate the given function over a tetrapyd volume.
+            The function f(k1,k2,k3) is assumed to be symmetric
+            under the permutations in (k1, k2, k3).
         '''
 
         if callable(integrand):
@@ -64,15 +79,26 @@ class Quadrature:
 
         result = np.dot(self.weights, evals)
 
-        return eval
+        return result
+
+
+    def integrate_multi(self, integrand_list):
+        ''' Integrate the given functions over a tetrapyd volume.
+        '''
+        return np.array([self.integrate(integrand) for integrand in integrand_list])
     
 
-    def to_csv(self, output_path, float_format="%.18e"):
-        # Saves the grid and weights in a csv format
+    def to_dataframe(self):
+        # Shows the grid and weights in a pandas dataframe
         grid, weights = self.grid, self.weights
         df = pd.DataFrame({"k1": grid[0], "k2": grid[1], "k3": grid[2], "weight": weights})
         #df = pd.DataFrame({"i1": i1, "i2": i2, "i3": i3, "k1": grid[0], "k2": grid[1], "k3": grid[2],
         #                    "weight": weights})
+        return df
+
+    def to_csv(self, output_path, float_format="%.18e"):
+        # Saves the grid and weights in a csv format
+        df = self.to_dataframe()
         df.to_csv(output_path, float_format=float_format)
     
 
@@ -90,7 +116,7 @@ class Quadrature:
 
 def tetrapyd_volume(k_min, k_max):
     # Volume of the tetrapyd specified by k_min and k_max
-    alpha = k_max / k_min
+    alpha = k_min / k_max
     return (0.5 - 3 * alpha ** 2 + 3 * alpha ** 3) * (k_max ** 3)
 
 
@@ -296,6 +322,14 @@ def poly_evaluations(p, q, r, k1, k2, k3):
     return evals
 
 
+def symmetric_polynomial(p, q, r):
+    ''' Returns a function which represents
+        f(k1,k2,k3) = (k1^p * k2^q + k3^r  + (5 syms)) / 6.0
+    '''
+
+    return lambda k1, k2, k3: poly_evaluations(p, q, r, k1, k2, k3)
+
+
 def grid_sine_evaluations(grid_1d, omegas, phis, i1, i2, i3):
     ''' Computes the matrix containing the evaluations of
     f(x,y,z) = sin(omega * (x + y + z) + phi)
@@ -316,6 +350,13 @@ def sine_evaluations(omega, phi, k1, k2, k3):
     evals = np.sin(omega * (k1 + k2 + k3) + phi)
 
     return evals
+
+
+def sinusoidal(omega, phi):
+    ''' Returns a function which represents
+        f(k1,k2,k3) = sin(omega * (k1 + k2 + k3) + phi)
+    '''
+    return lambda k1, k2, k3: sine_evaluations(omega, phi, k1, k2, k3)
 
 
 ## Functions related to the analytic expression of
@@ -405,6 +446,11 @@ def analytic_poly_integrals_alpha(ps, qs, rs, alpha):
 
     if alpha == 0:
         return analytic_poly_integrals(ps, qs, rs)
+    
+    if isinstance(ps, int) or isinstance(ps, float):
+        ps, qs, rs = np.array([ps]), np.array([qs]), np.array([rs])
+    else:
+        ps, qs, rs = np.array(ps), np.array(qs), np.array(rs)
 
     a = alpha
     b = 1 - a
@@ -468,6 +514,22 @@ def analytic_poly_cross_product_alpha(ps, qs, rs, alpha):
     ps = np.round(ps).astype(int)
     qs = np.round(qs).astype(int)
     rs = np.round(rs).astype(int)
+
+    if alpha == 0:
+        # When k_min = 0, the calculations are more straightforward
+
+        num_polys = len(ps)
+        cross_prod = np.zeros((num_polys, num_polys))
+
+        psv, qsv, rsv = ps[:,np.newaxis], qs[:,np.newaxis], rs[:,np.newaxis]
+        perms = [(psv+ps, qsv+qs, rsv+rs), (psv+ps, qsv+rs, rsv+qs),
+                 (psv+qs, qsv+ps, rsv+rs), (psv+qs, qsv+rs, rsv+ps),
+                 (psv+rs, qsv+ps, rsv+qs), (psv+rs, qsv+qs, rsv+ps)]
+        
+        for p, q, r in perms:
+            cross_prod += analytic_poly_integrals(p, q, r) / 6
+
+        return cross_prod
 
     # Shorthand definitions
     a = alpha
@@ -546,7 +608,7 @@ def analytic_poly_cross_product_alpha(ps, qs, rs, alpha):
 
 ## Main quadrature code
 
-def unit_quadrature_nnls(alpha, N, include_endpoints=True):
+def unit_quadrature_nnls(alpha, N, M=None, include_endpoints=True):
     ''' Returns a quadrature rule which has N grid points on each dimension.
     Minimises the integration error of symmetric polynomials 
     order <= f(N) over a tetrapyd specified by the triangle conditions and
@@ -560,29 +622,13 @@ def unit_quadrature_nnls(alpha, N, include_endpoints=True):
     grid = np.array([grid_1d[i1], grid_1d[i2], grid_1d[i3]])
 
     # Prepare orthogonal polynomials
-    M = 2 * N
-    ''' # Alternative way of selecting M
-    while True:
-        # List of polynomial orders (p,q,r)
-        ps, qs, rs = poly_triplets_total_degree(M, negative_power)
-        #ps, qs, rs = poly_triplets_individual_degree(M)
-        #ps, qs, rs = poly_triplets_total_degree_ns(M)
-        num_polys = ps.shape[0]
-
-        if num_polys > num_weights:
-            M -= 1
-            ps, qs, rs = poly_triplets_total_degree(M, negative_power)
-            #ps, qs, rs = poly_triplets_individual_degree(M)
-            #ps, qs, rs = poly_triplets_total_degree_ns(M)
-            num_polys = ps.shape[0]
-            break
-        else:
-            M += 1
-    '''
+    if M is None:
+        #M = 2 * N
+        M = round(1.5 * N)
     ps, qs, rs = poly_triplets_total_degree(M)
     num_polys = ps.shape[0]
 
-    print("M =", M, ", N =", N)
+    #print("M =", M, ", N =", N)
 
     # Obtain orthonormalisation coefficients for the polynomials
     ortho_L = orthonormal_polynomials(ps, qs, rs, alpha)
@@ -620,9 +666,10 @@ def unit_quadrature_nnls(alpha, N, include_endpoints=True):
     return grid, weights
 
 
-def uniform_tetrapyd_weights(alpha, N, MC_N_SAMPLES=10000, include_endpoints=True):
+def uniform_tetrapyd_weights(alpha, N, MC_n_samples=10000, include_endpoints=True, use_COM=False):
     ''' Returns a uniform tetrapyd grid with weights proportional to 
     the volume of the grid point (voxel).
+    If use_COM is True, the grid points are located at the center of mass (COM) of each voxel.
     '''
 
     # Set up grid points
@@ -658,15 +705,22 @@ def uniform_tetrapyd_weights(alpha, N, MC_N_SAMPLES=10000, include_endpoints=Tru
 
     # Draw samples uniformly within each cubic cell
     rng = default_rng(seed=0)
-    r1 = rng.uniform(lb1[need_MC], ub1[need_MC], size=(MC_N_SAMPLES, MC_count))
-    r2 = rng.uniform(lb2[need_MC], ub2[need_MC], size=(MC_N_SAMPLES, MC_count))
-    r3 = rng.uniform(lb3[need_MC], ub3[need_MC], size=(MC_N_SAMPLES, MC_count))
+    r1 = rng.uniform(lb1[need_MC], ub1[need_MC], size=(MC_n_samples, MC_count))
+    r2 = rng.uniform(lb2[need_MC], ub2[need_MC], size=(MC_n_samples, MC_count))
+    r3 = rng.uniform(lb3[need_MC], ub3[need_MC], size=(MC_n_samples, MC_count))
 
     # Estimate the fraction of samples that lie inside the tetrapyd
+    #in_tetra = ((r1 >= r2) & (r2 >= r3) & (r2 + r3 >= r1))
     in_tetra = ((r1 + r2 >= r3) & (r2 + r3 >= r1) & (r3 + r1 >= r2))
-    MC_weights = np.sum(in_tetra, axis=0) / MC_N_SAMPLES
-    
+    MC_weights = np.sum(in_tetra, axis=0) / MC_n_samples
+ 
     tetrapyd_weights[need_MC] *= MC_weights
+
+    if use_COM:
+        n_in_tetra = np.sum(in_tetra, axis=0)
+        grid[0,need_MC] = np.sum(r1 * in_tetra, axis=0) / n_in_tetra
+        grid[1,need_MC] = np.sum(r2 * in_tetra, axis=0) / n_in_tetra
+        grid[2,need_MC] = np.sum(r3 * in_tetra, axis=0) / n_in_tetra
 
     # Make sure the overall volume is exact
     #tetra_volume = 0.5 - 3 * alpha ** 2 + 3 * alpha ** 3
@@ -704,3 +758,78 @@ def orthonormal_polynomials(ps, qs, rs, alpha):
     L = C[:,:] * N[:,np.newaxis]
 
     return L
+
+
+## Testing routines
+
+def test_polynomial_integration(quadratures, alpha=None, max_degree=10):
+    # Compare the numerical integral errors of the symmetric polynomials
+    # over the tetrapyd with the analytical expression
+
+    if not isinstance(quadratures, list):
+        quadratures = [quadratures]
+    
+    if alpha is None:
+        alpha = quadratures[0].alpha
+
+    ps, qs, rs = poly_triplets_total_degree(max_degree)
+    polys = [symmetric_polynomial(p, q, r) for p, q, r in zip(ps, qs, rs)]
+
+    analytic = analytic_poly_integrals_alpha(ps, qs, rs, alpha)
+    numericals = [quad.integrate_multi(polys) for quad in quadratures]
+    
+    errors = [(numerical-analytic)/analytic for numerical in numericals]
+    
+    if len(errors) == 1:
+        errors = errors[0]
+
+    return errors
+
+
+def plot_test_polynomial_integration(quadratures, alpha=None, labels=None, colors=None, max_degree=30, fig=None, ax=None):
+    # Create a plot for comparing the numerical integral errors of
+    # the symmetric polynomials over the tetrapyd with the analytical expression
+
+    if not isinstance(quadratures, list):
+        quadratures = [quadratures]
+    n_quads = len(quadratures)
+
+    if fig is None:
+        fig, ax = plt.subplots()
+    
+    if labels is None:
+        labels = [f"Quad #{n+1}" for n in range(n_quads)]
+
+    # Integration Errors
+    errors = test_polynomial_integration(quadratures, alpha, max_degree)
+
+    # Polynomials used
+    ps, qs, rs = poly_triplets_total_degree(max_degree)
+    tot_degree = ps + qs + rs
+    poly_number = np.arange(len(tot_degree))
+
+    # Helper functions for the plot
+    def forward(x):
+        return np.interp(x, poly_number, tot_degree)
+    def inverse(y):
+        return np.interp(y, tot_degree, poly_number)
+
+    # Plot results
+    if colors is None:
+        for error, label in zip(errors, labels):
+            ax.plot(np.abs(error), label=label)
+    else:
+        for error, label, color in zip(errors, labels, colors):
+            ax.plot(np.abs(error), label=label, c=color)
+
+    # Label axes
+    ax.set_xlabel("Polynomial Number")
+    ax.set_xlim([0,len(poly_number)])
+    ax.set_yscale('log')
+    ax.set_ylabel("Fractional Error")
+    secax = ax.secondary_xaxis("top", functions=(forward,inverse))
+    secax.set_xlabel("Total Order $(p+q+r)$")
+    ax.legend(loc="lower right")
+    ax.grid(True, alpha=0.3)
+
+    return fig, ax
