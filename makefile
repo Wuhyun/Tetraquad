@@ -3,10 +3,8 @@ DIR := ${CURDIR}
 PYTHON := python3
 
 lib:
-	${PYTHON} -m pip install -e tetraquad.py
+	${PYTHON} -m pip install -e .
 
 clean:
-	rm -rf build/*
-	rm -rf lib/*
 	rm -rf *.egg-info
 
