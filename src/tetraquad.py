@@ -15,6 +15,7 @@ import scipy
 import pandas as pd
 import mpmath
 import matplotlib.pyplot as plt
+from itertools import permutations
 
 class Quadrature:
     ''' Class for storing the results of a 'Tetraquad' quadrature rule.
@@ -26,6 +27,7 @@ class Quadrature:
         self.k_max = k_max
         self.quad_type = quad_type
         self.N = N
+        self.symmetrized = False
 
         if quad_type == "tetraquad":
             # Base "Tetraquad" quadrature
@@ -42,42 +44,51 @@ class Quadrature:
         elif quad_type == "uniform":
             # Uniform quadrature - 3D trapezoidal rule
             self.alpha = k_min / k_max
-            self.include_endpoints = kwargs.get("include_endpoints", True)
+            self.include_endpoints = kwargs.get("include_endpoints", False)
+            self.include_borderline = kwargs.get("include_borderline", True)
             self.MC_n_samples = kwargs.get("MC_n_samples", 10000)
             self.use_COM = kwargs.get("use_COM", False)
 
             # Compute the quadrature for k_max = 1 and rescale
             grid, weights = uniform_tetrapyd_weights(self.alpha, N, MC_n_samples=self.MC_n_samples,
                                                      include_endpoints=self.include_endpoints,
+                                                     include_borderline=self.include_borderline,
                                                      use_COM=self.use_COM)
             self.grid = k_max * grid
             self.weights = (k_max ** 3) * weights
         
         elif quad_type == "saved":
-            # Loaded from a csv file
-            # Currently, the output file does not contain the full infromation...
-            # TODO: use a better input/output file format and remove this
+            # A dummy instance without the full information,
+            # such as when it is loaded from a csv file
+            # (Currently, the output file does not contain the full infromation.
+            # TODO: use a better input/output file format and remove this)
             self.grid = kwargs.get("grid")
             self.weights = kwargs.get("weights")
             
     
-    def integrate(self, integrand):
+    def integrate(self, integrand, symmetric_integrand=False):
         ''' Integrate the given function over a tetrapyd volume.
-            The function f(k1,k2,k3) is assumed to be symmetric
-            under the permutations in (k1, k2, k3).
         '''
 
         if callable(integrand):
             # Function evaluation
             k1, k2, k3 = self.grid
-            evals = integrand(k1, k2, k3)
+            if symmetric_integrand or self.symmetrized:
+                # Either the integrand or the quadrature is symmetrized
+                evals = integrand(k1, k2, k3)
+            else:
+                # Otherwise, the integrand is symmetrized
+                evals = (integrand(k1, k2, k3) + integrand(k1, k3, k2) + integrand(k2, k1, k3)
+                         + integrand(k2, k3, k1) + integrand(k3, k1, k2) + integrand(k3, k2, k1)) / 6
         
         else:
-            # "integrand" is assumed to be an array
-            # evaluated at the grid points
+            # "integrand" is assumed to be an array (or matrix)
+            # of function(s)evaluated at the grid points
+            # TODO: generalise to non-symmetric integrands
+            assert symmetric_integrand or self.symmetrized
             evals = integrand
 
-        result = np.dot(self.weights, evals)
+        result = np.dot(evals, self.weights)
 
         return result
 
@@ -86,6 +97,49 @@ class Quadrature:
         ''' Integrate the given functions over a tetrapyd volume.
         '''
         return np.array([self.integrate(integrand) for integrand in integrand_list])
+    
+
+    def symmetrize_quadrature(self):
+        ''' Extends the quadrature based on a tetrapyd slice to the full tetrapyd by symmetry.
+        '''
+
+        df = self.to_dataframe()
+
+        # create an empty list to store the rows of the new dataframe
+        new_rows = []
+
+        for index, row in df.iterrows():
+            # generate all permutations of the row's values
+            k1, k2, k3 = row["k1"], row["k2"], row["k3"]
+            weight = row["weight"]
+
+            if k1 == k2 and k2 == k3:
+                # No need to symmetrize
+                new_rows.append({'k1': k1, 'k2': k2, 'k3': k3, 'weight': weight})
+
+            elif k1 == k2 or k2 == k3:
+                # Need three copies
+                new_rows.append({'k1': k1, 'k2': k2, 'k3': k3, 'weight': weight/3})
+                new_rows.append({'k1': k2, 'k2': k3, 'k3': k1, 'weight': weight/3})
+                new_rows.append({'k1': k3, 'k2': k1, 'k3': k2, 'weight': weight/3})
+            
+            else:
+                # Need six copies
+                perm = permutations([k1, k2, k3])
+                for p in perm:
+                    new_rows.append({'k1': p[0], 'k2': p[1], 'k3': p[2], 'weight': weight/6})
+
+        # create the new dataframe from the list of rows
+        new_df = pd.DataFrame(new_rows)
+        new_grid = new_df[["k1", "k2", "k3"]].values.T
+        new_weights = new_df[["weight"]].values.flatten()
+
+        new_quad = Quadrature(self.k_min, self.k_max, "saved")
+        new_quad.symmetrized = True
+        new_quad.grid = new_grid
+        new_quad.weights = new_weights
+
+        return new_quad
     
 
     def to_dataframe(self):
@@ -238,7 +292,7 @@ def poly_triplets_total_degree_ns(N, ns=0.9660499):
     return np.array(tuples).T
 
 
-def uni_tetra_triplets(alpha, N, include_endpoints=True, keep_borderline=True):
+def uni_tetra_triplets(alpha, N, include_endpoints=True, include_borderline=True):
     ''' Indices for a uniform grid inside the tetrapyd
     satisfying 1 >= k1 >= k2 >= k3 >= alpha and k2 + k3 >= k1.
     When keep_borderline is True, keep all the grid points that lie outside
@@ -252,7 +306,7 @@ def uni_tetra_triplets(alpha, N, include_endpoints=True, keep_borderline=True):
         k_grid = np.linspace(alpha+dk/2, 1-dk/2, N)
     
 
-    if not keep_borderline:
+    if not include_borderline:
         # The following can miss out some volume elements
         tuples = [[i1, i2, i3] for i1 in range(N)
                     for i2 in range(i1+1)
@@ -616,7 +670,7 @@ def unit_quadrature_nnls(alpha, N, M=None, include_endpoints=True):
     '''
 
     # Set up grid points
-    i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N, include_endpoints, keep_borderline=False)
+    i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N, include_endpoints, include_borderline=False)
     num_weights = i1.shape[0]
 
     grid = np.array([grid_1d[i1], grid_1d[i2], grid_1d[i3]])
@@ -666,14 +720,14 @@ def unit_quadrature_nnls(alpha, N, M=None, include_endpoints=True):
     return grid, weights
 
 
-def uniform_tetrapyd_weights(alpha, N, MC_n_samples=10000, include_endpoints=True, use_COM=False):
+def uniform_tetrapyd_weights(alpha, N, MC_n_samples=10000, include_endpoints=True, include_borderline=True, use_COM=False):
     ''' Returns a uniform tetrapyd grid with weights proportional to 
     the volume of the grid point (voxel).
     If use_COM is True, the grid points are located at the center of mass (COM) of each voxel.
     '''
 
     # Set up grid points
-    i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N, include_endpoints)
+    i1, i2, i3, grid_1d = uni_tetra_triplets(alpha, N, include_endpoints, include_borderline=include_borderline)
     num_weights = i1.shape[0]
 
     grid = np.zeros((3, num_weights))
