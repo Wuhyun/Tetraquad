@@ -1,5 +1,5 @@
 # Tetraquad
-A code for computing numerical quadrature rule for integrals over a tetrapyd domain. For mathematical details, please refer to this paper.
+A code for computing numerical quadrature rule for integrals over a tetrapyd domain. For mathematical details, please refer to [this paper](https://arxiv.org/abs/2305.14646).
 
 ## Dependencies
 
@@ -19,7 +19,7 @@ Clone the repository by, e.g.,
 git clone https://github.com/Wuhyun/Tetraquad.git
 ```
 
-Install the pcakage by running
+Install the package by running
 ```
 $ make
 ```
